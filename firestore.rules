@@ -1,0 +1,453 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function actorEmail() { return request.auth.token.get('email', '').lower(); }
+    // Klien selalu mengirim identitas pelaku dalam huruf kecil
+    // (getCurrentActorIdentity() memanggil toLowerCase()). Membandingkannya
+    // dengan request.auth.token.email apa adanya membuat akun yang emailnya
+    // tersimpan dengan huruf besar di Firebase Authentication ditolak selamanya
+    // pada SETIAP alur kerja. Perbandingan karena itu dilakukan setelah kedua
+    // sisi diseragamkan, dan token tanpa field email tetap gagal karena
+    // actorEmail() mengembalikan string kosong.
+    function matchesActor(value) {
+      return value is string && value.lower() == actorEmail() && actorEmail() != '';
+    }
+    function rolePath() { return /databases/$(database)/documents/userRoles/$(request.auth.uid); }
+    function hasRoleDocument() { return signedIn() && exists(rolePath()); }
+    // 'user' adalah nama peran lama untuk Accounting.
+    function normalizeRole(role) { return role == 'user' ? 'accounting' : role; }
+    // Setiap exists()/get() di dalam rules dihitung sebagai akses dokumen, dan
+    // Firestore membatasi jumlahnya per permintaan (10 untuk permintaan satu
+    // dokumen). Bentuk sebelumnya, storedRole() == 'user' ? 'accounting' :
+    // storedRole(), memanggil pembacaan peran DUA KALI setiap kali currentRole()
+    // dipakai. Dengan normalisasi lewat argumen, satu pemanggilan currentRole()
+    // kini hanya satu exists() + satu get().
+    function currentRole() {
+      return normalizeRole(hasRoleDocument() ? get(rolePath()).data.get('role', 'viewer') : 'viewer');
+    }
+    function isAdmin() { return currentRole() == 'admin'; }
+    function canEditAccountingClaims() { return currentRole() in ['admin', 'accounting']; }
+    // Finance boleh membuat pengajuan baru dari Input Pengajuan Baru (isQuick),
+    // tetapi hak create ini tidak membuka workflow Accounting untuk Finance.
+    function canCreateClaim() {
+      return canEditAccountingClaims()
+        || (currentRole() == 'finance' && request.resource.data.get('isQuick', false) == true);
+    }
+    function canCreateAuditEvent() { return currentRole() in ['admin', 'accounting', 'finance', 'viewer']; }
+    function auditRoleMatches(role) { return normalizeRole(role) == currentRole(); }
+
+    function validClaimShape() {
+      return request.resource.data.keys().hasAll([
+        'id', 'nama', 'nik', 'statusClaim', 'tglProses', 'tglSubmit',
+        'totalHeader', 'mataUang', '_version', '_updatedAt', '_updatedAtMs', '_updatedBy'
+      ])
+      && request.resource.data.nama is string
+      && request.resource.data.nik is string
+      && request.resource.data.statusClaim is string
+      && request.resource.data.totalHeader is number
+      && request.resource.data.totalHeader >= 0
+      && request.resource.data.mataUang is string
+      && request.resource.data.mataUang.matches('^[A-Z]{3}$')
+      && request.resource.data._version is int
+      && request.resource.data._updatedAt is timestamp
+      && request.resource.data._updatedAtMs is int
+      && request.resource.data._updatedAtMs > 0
+      && request.resource.data._updatedBy is string;
+    }
+
+    function validDeletionTombstone(claimId) {
+      return request.resource.data.keys().hasAll([
+          'claimId', 'sourceVersion', 'deletedAtMs', 'deletedAt', 'deletedBy'
+        ])
+        && request.resource.data.claimId == claimId
+        && request.resource.data.sourceVersion is int
+        && request.resource.data.sourceVersion >= 0
+        && request.resource.data.deletedAtMs is int
+        && request.resource.data.deletedAtMs > 0
+        && request.resource.data.deletedAt is timestamp
+        && matchesActor(request.resource.data.deletedBy);
+    }
+
+    // Dokumen lama dapat menyimpan field wajib di luar bentuk yang dituntut
+    // validClaimShape(): kode mata uang huruf kecil, total header berupa teks,
+    // atau nama/NIK bukan string. Payload apa pun wajib mengirimnya dalam bentuk
+    // yang sah, sehingga selisihnya tidak terhindarkan dan setiap perubahan
+    // status pada dokumen itu ditolak selamanya. Karena itu field-field ini
+    // boleh ikut berubah pada update alur kerja HANYA ketika nilai yang
+    // tersimpan memang belum memenuhi validClaimShape(). Selama nilainya sudah
+    // sah, nilainya tetap tidak dapat diubah lewat jalur alur kerja.
+    function repairableNama() {
+      return request.resource.data.nama == resource.data.get('nama', '')
+        || !(resource.data.get('nama', '') is string);
+    }
+    function repairableNik() {
+      return request.resource.data.nik == resource.data.get('nik', '')
+        || !(resource.data.get('nik', '') is string);
+    }
+    function repairableAmount() {
+      return request.resource.data.totalHeader == resource.data.get('totalHeader', -1)
+        || !(resource.data.get('totalHeader', -1) is number)
+        || resource.data.get('totalHeader', -1) < 0;
+    }
+    function repairableCurrency() {
+      return request.resource.data.mataUang == resource.data.get('mataUang', '')
+        || !(resource.data.get('mataUang', '') is string)
+        || !resource.data.get('mataUang', '').matches('^[A-Z]{3}$');
+    }
+    function shapeRepairOnly() {
+      return repairableNama()
+        && repairableNik()
+        && repairableAmount()
+        && repairableCurrency();
+    }
+
+    function workflowFieldsOnly() {
+      return shapeRepairOnly()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'nama', 'nik', 'totalHeader', 'mataUang',
+        'statusClaim', 'postedAt', 'postedBy', 'paymentAt', 'paymentAtMs',
+        'paymentDate', 'paymentBy', 'paymentReference',
+        'holdReason', 'holdAt', 'holdAtMs', 'holdBy',
+        'returnReason', 'returnedAt', 'returnedAtMs', 'returnedBy',
+        'lastPaymentCancellation', 'lastHoldRelease',
+        'cancelReason', 'canceledAt', 'canceledAtMs', 'canceledBy',
+        'reactivateReason', 'reactivatedAt', 'reactivatedAtMs', 'reactivatedBy', 'isInactive',
+        'workflowTimestamps', 'isArchived', 'waitingApprovalAt',
+        'reviseStep', 'reviseTime', 'reviseTimestamp', 'reviseNote',
+        'historyLog', '_version', '_updatedAt', '_updatedAtMs', '_updatedBy'
+      ]);
+    }
+
+    function requestWorkflowTimestamps() { return request.resource.data.get('workflowTimestamps', {}); }
+    function storedWorkflowTimestamps() { return resource.data.get('workflowTimestamps', {}); }
+
+    // Dokumen lama dapat tersimpan tanpa workflowTimestamps sama sekali.
+    // Membacanya langsung membuat evaluasi rules gagal dan seluruh update
+    // ditolak, jadi selalu diambil lewat get() dengan map kosong sebagai
+    // nilai bawaan.
+    function preservesPostedAudit() {
+      return request.resource.data.get('postedAt', null) == resource.data.get('postedAt', null)
+        && request.resource.data.get('postedBy', null) == resource.data.get('postedBy', null)
+        && requestWorkflowTimestamps().get('completedAt', null)
+          == storedWorkflowTimestamps().get('completedAt', null);
+    }
+
+    function hasWorkflowHistory() {
+      return request.resource.data.historyLog is list
+        && request.resource.data.historyLog.size() >= resource.data.get('historyLog', []).size() + 1;
+    }
+
+    // Cabang Posted sengaja TIDAK memakai workflowFieldsOnly(). Peran Accounting
+    // sudah boleh mengubah field isi apa pun selama claim belum final, sehingga
+    // pembatasan itu tidak menambah keamanan: hasil akhir yang sama selalu dapat
+    // dicapai lewat dua update terpisah (ubah isi saat In Process, lalu Posted).
+    // Yang dilakukannya hanya menolak satu payload yang sah, karena aplikasi
+    // menyinkronkan dokumen secara utuh dan mengantre perubahan ketika offline:
+    // suntingan isi yang belum terkirim ikut menumpang pada write yang
+    // memindahkan status ke Posted, lalu seluruh transisi ditolak. Syarat audit
+    // dipertahankan, dan hasWorkflowHistory() ditambahkan supaya penyelesaian
+    // RTP tetap wajib meninggalkan jejak pada historyLog.
+    function validAccountingUpdate() {
+      return !(resource.data.statusClaim in ['Posted', 'Paid', 'Hold', 'Canceled'])
+        && request.resource.data.statusClaim in ['In Process', 'Revisi', 'Waiting Approval', 'Posted', 'Returned by Finance']
+        && (request.resource.data.statusClaim != 'Returned by Finance' || resource.data.statusClaim == 'Returned by Finance')
+        && (request.resource.data.statusClaim != 'Posted'
+          || (request.resource.data.keys().hasAll(['postedAt', 'postedBy', 'workflowTimestamps', 'historyLog'])
+            && request.resource.data.isArchived == true
+            && hasWorkflowHistory()));
+    }
+
+    // Pencatatan hardcopy: tanggal berkas fisik diterima, PIC pencatat, dan
+    // catatannya. Terbuka untuk Accounting, Admin, DAN Finance, karena
+    // penerimaan berkas harian dikerjakan Finance - satu-satunya perubahan data
+    // di luar alur pembayaran yang boleh dilakukan Finance.
+    //
+    // Dibatasi ketat: status klaim tidak boleh ikut berubah, dan hanya field
+    // hardcopy beserta historyLog yang boleh berbeda. Dengan begitu cabang ini
+    // tidak dapat dipakai sebagai jalan memutar untuk menyunting nilai klaim.
+    function validHardcopyUpdate() {
+      return request.resource.data.statusClaim == resource.data.statusClaim
+        && shapeRepairOnly()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'nama', 'nik', 'totalHeader', 'mataUang',
+          'hardcopyDate', 'hardcopyBy', 'hardcopyAt', 'hardcopyAtMs', 'hardcopyNote',
+          'historyLog', '_version', '_updatedAt', '_updatedAtMs', '_updatedBy'
+        ])
+        && request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'hardcopyDate', 'hardcopyBy', 'hardcopyAt', 'hardcopyAtMs', 'hardcopyNote'
+        ])
+        && hasWorkflowHistory();
+    }
+
+    function validAccountingCancel() {
+      return !(resource.data.statusClaim in ['Posted', 'Paid', 'Hold', 'Canceled'])
+        && request.resource.data.statusClaim == 'Canceled'
+        && workflowFieldsOnly()
+        && request.resource.data.keys().hasAll([
+          'cancelReason', 'canceledAt', 'canceledAtMs', 'canceledBy',
+          'workflowTimestamps', 'historyLog', 'isInactive', 'isArchived'
+        ])
+        && request.resource.data.cancelReason is string
+        && request.resource.data.cancelReason.size() > 0
+        && request.resource.data.cancelReason.size() <= 500
+        && request.resource.data.canceledAt is string
+        && request.resource.data.canceledAt.size() > 0
+        && request.resource.data.canceledAtMs is int
+        && request.resource.data.canceledAtMs > 0
+        && matchesActor(request.resource.data.canceledBy)
+        && request.resource.data.isInactive == true
+        && request.resource.data.isArchived == true
+        && request.resource.data.workflowTimestamps.get('canceledAt', null) == request.resource.data.canceledAtMs
+        && hasWorkflowHistory();
+    }
+
+    function validAccountingReverseCancel() {
+      return resource.data.statusClaim == 'Canceled'
+        && resource.data.get('isInactive', false) == true
+        && request.resource.data.statusClaim == 'In Process'
+        && workflowFieldsOnly()
+        && request.resource.data.keys().hasAll([
+          'reactivateReason', 'reactivatedAt', 'reactivatedAtMs', 'reactivatedBy',
+          'workflowTimestamps', 'historyLog', 'isInactive', 'isArchived'
+        ])
+        && request.resource.data.reactivateReason is string
+        && request.resource.data.reactivateReason.size() > 0
+        && request.resource.data.reactivateReason.size() <= 500
+        && request.resource.data.reactivatedAt is string
+        && request.resource.data.reactivatedAt.size() > 0
+        && request.resource.data.reactivatedAtMs is int
+        && request.resource.data.reactivatedAtMs > 0
+        && matchesActor(request.resource.data.reactivatedBy)
+        && request.resource.data.isInactive == false
+        && request.resource.data.isArchived == false
+        && request.resource.data.workflowTimestamps.get('reactivatedAt', null) == request.resource.data.reactivatedAtMs
+        && hasWorkflowHistory();
+    }
+
+    function validAdminReversePosted() {
+      return resource.data.statusClaim == 'Posted'
+        && request.resource.data.statusClaim in ['In Process', 'Waiting Approval', 'Revisi']
+        && workflowFieldsOnly()
+        && request.resource.data.isArchived == false
+        && !request.resource.data.keys().hasAny(['postedAt', 'postedBy'])
+        && requestWorkflowTimestamps().get('completedAt', null) == null
+        && hasWorkflowHistory();
+    }
+
+    function validFinancePaid() {
+      return resource.data.statusClaim in ['Posted', 'Hold']
+        && request.resource.data.statusClaim == 'Paid'
+        && workflowFieldsOnly()
+        // V3.2 - NEVER ALLOW PAID WITHOUT HARDCOPY.
+        // Dibaca dari resource.data, yaitu dokumen yang SUDAH tersimpan:
+        // workflowFieldsOnly() di atas tidak memuat field hardcopy pada daftar
+        // izinnya, sehingga satu write Paid tidak mungkin sekaligus menyisipkan
+        // hardcopyDate. get() dipakai karena validClaimShape() tidak mewajibkan
+        // field ini - dokumen lama dapat tidak memilikinya sama sekali, dan
+        // pembacaan langsung akan menggagalkan evaluasi seluruh aturan.
+        // Yang dijaga di sini adalah keberadaan dan bentuk dd/mm/yyyy; keabsahan
+        // kalender (mis. 31/02) dijaga isValidDateString() di sisi aplikasi.
+        && resource.data.get('hardcopyDate', '') is string
+        && resource.data.get('hardcopyDate', '').matches('^[0-9]{2}/[0-9]{2}/[0-9]{4}$')
+        && request.resource.data.keys().hasAll([
+          'paymentAt', 'paymentAtMs', 'paymentDate', 'paymentBy',
+          'paymentReference', 'workflowTimestamps', 'historyLog'
+        ])
+        && request.resource.data.paymentAt is string
+        && request.resource.data.paymentAt.size() > 0
+        && request.resource.data.paymentAtMs is int
+        && request.resource.data.paymentAtMs > 0
+        && request.resource.data.paymentDate is string
+        && request.resource.data.paymentDate.matches('^[0-9]{2}/[0-9]{2}/[0-9]{4}$')
+        && matchesActor(request.resource.data.paymentBy)
+        // Referensi pembayaran tidak lagi wajib diisi (permintaan Finance).
+        // Field-nya tetap dikirim supaya bentuk dokumen seragam dan nilainya
+        // tetap tersimpan bila diisi, tetapi boleh berupa teks kosong.
+        && request.resource.data.paymentReference is string
+        && request.resource.data.paymentReference.size() <= 120
+        && request.resource.data.isArchived == true
+        && request.resource.data.workflowTimestamps.get('paidAt', null) == request.resource.data.paymentAtMs
+        && preservesPostedAudit()
+        && hasWorkflowHistory()
+        && (resource.data.statusClaim != 'Hold'
+          || !request.resource.data.keys().hasAny(['holdReason', 'holdAt', 'holdAtMs', 'holdBy']));
+    }
+
+    function validFinanceHold() {
+      return resource.data.statusClaim == 'Posted'
+        && request.resource.data.statusClaim == 'Hold'
+        && workflowFieldsOnly()
+        && request.resource.data.keys().hasAll(['holdReason', 'holdAt', 'holdAtMs', 'holdBy', 'workflowTimestamps', 'historyLog'])
+        && request.resource.data.holdReason is string
+        && request.resource.data.holdReason.size() > 0
+        && request.resource.data.holdReason.size() <= 500
+        && request.resource.data.holdAt is string
+        && request.resource.data.holdAtMs is int
+        && request.resource.data.holdAtMs > 0
+        && matchesActor(request.resource.data.holdBy)
+        && request.resource.data.isArchived == true
+        && request.resource.data.workflowTimestamps.get('holdAt', null) == request.resource.data.holdAtMs
+        && preservesPostedAudit()
+        && hasWorkflowHistory();
+    }
+
+    function validFinanceReturn() {
+      return resource.data.statusClaim in ['Posted', 'Hold']
+        && request.resource.data.statusClaim == 'Returned by Finance'
+        && workflowFieldsOnly()
+        && request.resource.data.keys().hasAll(['returnReason', 'returnedAt', 'returnedAtMs', 'returnedBy', 'workflowTimestamps', 'historyLog'])
+        && request.resource.data.returnReason is string
+        && request.resource.data.returnReason.size() > 0
+        && request.resource.data.returnReason.size() <= 500
+        && request.resource.data.returnedAt is string
+        && request.resource.data.returnedAtMs is int
+        && request.resource.data.returnedAtMs > 0
+        && matchesActor(request.resource.data.returnedBy)
+        && request.resource.data.isArchived == false
+        && request.resource.data.workflowTimestamps.get('returnedAt', null) == request.resource.data.returnedAtMs
+        && preservesPostedAudit()
+        && hasWorkflowHistory()
+        && (resource.data.statusClaim != 'Hold'
+          || !request.resource.data.keys().hasAny(['holdReason', 'holdAt', 'holdAtMs', 'holdBy']));
+    }
+
+    // Batal Bayar terbuka untuk Admin dan Finance (lihat claimTransitionAllowed).
+    // Pembayaran keliru sering baru ketahuan oleh rekan yang berbeda shift, jadi
+    // pembatalannya tidak dikunci ke pencatat pembayarannya. Pelakunya tetap
+    // terekam pada lastPaymentCancellation.cancelledBy yang wajib sama dengan
+    // email pemanggil, alasannya wajib diisi, dan jejaknya masuk historyLog.
+    function validFinanceCancelPaid() {
+      return resource.data.statusClaim == 'Paid'
+        && request.resource.data.statusClaim == 'Posted'
+        && workflowFieldsOnly()
+        && request.resource.data.lastPaymentCancellation is map
+        && request.resource.data.lastPaymentCancellation.reason is string
+        && request.resource.data.lastPaymentCancellation.reason.size() > 0
+        && request.resource.data.lastPaymentCancellation.reason.size() <= 500
+        && request.resource.data.lastPaymentCancellation.cancelledAtMs is int
+        && matchesActor(request.resource.data.lastPaymentCancellation.cancelledBy)
+        && !request.resource.data.keys().hasAny(['paymentAt', 'paymentAtMs', 'paymentDate', 'paymentBy', 'paymentReference'])
+        && requestWorkflowTimestamps().get('paidAt', null) == null
+        && request.resource.data.isArchived == true
+        && preservesPostedAudit()
+        && hasWorkflowHistory();
+    }
+
+    function validFinanceReleaseHold() {
+      return resource.data.statusClaim == 'Hold'
+        && request.resource.data.statusClaim == 'Posted'
+        && workflowFieldsOnly()
+        && request.resource.data.lastHoldRelease is map
+        && request.resource.data.lastHoldRelease.reason is string
+        && request.resource.data.lastHoldRelease.reason.size() > 0
+        && request.resource.data.lastHoldRelease.reason.size() <= 500
+        && request.resource.data.lastHoldRelease.releasedAtMs is int
+        && matchesActor(request.resource.data.lastHoldRelease.releasedBy)
+        && !request.resource.data.keys().hasAny(['holdReason', 'holdAt', 'holdAtMs', 'holdBy'])
+        && requestWorkflowTimestamps().get('holdAt', null) == null
+        && request.resource.data.isArchived == true
+        && preservesPostedAudit()
+        && hasWorkflowHistory();
+    }
+
+    // SATU-SATUNYA tempat peran diperiksa untuk update claim. Peran dibaca sekali
+    // di pemanggil lalu diteruskan sebagai argumen, sehingga tidak ada lagi
+    // pembacaan userRoles berulang di dalam tiap cabang. Selain menghemat akses
+    // dokumen, pemisahan alurnya menjadi eksplisit dan mudah diaudit:
+    //
+    //   accounting : HANYA alur Accounting (In Process, Revisi, Waiting
+    //                Approval, Posted, Cancel, Reverse Cancel).
+    //   finance    : HANYA alur Finance (Paid, Hold, Return, Batal Bayar,
+    //                Lepas Hold).
+    //   admin      : kedua alur, ditambah Reverse Posted yang memang hanya
+    //                boleh dilakukan Admin.
+    function claimTransitionAllowed(role) {
+      return (role in ['admin', 'accounting'] && (
+              validAccountingUpdate()
+              || validAccountingCancel()
+              || validAccountingReverseCancel()))
+        || (role == 'admin' && validAdminReversePosted())
+        || (role in ['admin', 'finance'] && (
+              validFinancePaid()
+              || validFinanceHold()
+              || validFinanceReturn()
+              || validFinanceCancelPaid()
+              || validFinanceReleaseHold()))
+        || (role in ['admin', 'accounting', 'finance'] && validHardcopyUpdate());
+    }
+
+    match /claims/{claimId} {
+      allow read: if signedIn();
+      allow create: if canCreateClaim()
+                    && validClaimShape()
+                    && !(request.resource.data.statusClaim in ['Paid', 'Hold', 'Returned by Finance', 'Canceled'])
+                    && (request.resource.data.statusClaim != 'Posted' || isAdmin())
+                    && request.resource.data._version == 1;
+      allow update: if validClaimShape()
+                    && request.resource.data.id == resource.data.id
+                    && request.resource.data._version == resource.data._version + 1
+                    && claimTransitionAllowed(currentRole());
+      allow delete: if isAdmin()
+        && existsAfter(/databases/$(database)/documents/claimDeletions/$(claimId));
+    }
+
+    // Tombstone membuat penghapusan tetap tersinkron ke perangkat yang sempat
+    // offline tanpa harus membaca ulang seluruh collection claims.
+    match /claimDeletions/{claimId} {
+      allow read: if signedIn();
+      allow create: if isAdmin() && validDeletionTombstone(claimId);
+      allow update: if isAdmin()
+        && validDeletionTombstone(claimId)
+        && request.resource.data.deletedAt >= resource.data.deletedAt;
+      allow delete: if false;
+    }
+
+    match /userRoles/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if isAdmin()
+        && request.resource.data.role in ['admin', 'accounting', 'finance', 'viewer'];
+      allow delete: if isAdmin();
+    }
+
+    match /activityLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if canCreateAuditEvent()
+        && request.resource.data.keys().hasAll(['time', 'ts', 'user', 'action', 'actorUid', 'source'])
+        && request.resource.data.time is string
+        && request.resource.data.time.size() <= 80
+        && request.resource.data.ts is number
+        && request.resource.data.user is string
+        && request.resource.data.user.size() <= 200
+        && request.resource.data.action is string
+        && request.resource.data.action.size() <= 600
+        && request.resource.data.actorUid is string
+        && request.resource.data.actorUid.size() <= 200
+        && request.resource.data.source == 'application'
+        && request.resource.data.actorUid == request.auth.uid
+        && matchesActor(request.resource.data.user)
+        && auditRoleMatches(request.resource.data.actorRole);
+      // Retry dengan Event ID yang sama boleh menulis ulang payload identik.
+      // Field apa pun tetap tidak dapat diubah, sehingga log secara logis immutable.
+      allow update: if canCreateAuditEvent()
+        && request.resource.data == resource.data
+        && resource.data.source == 'application'
+        && resource.data.actorUid == request.auth.uid
+        && matchesActor(resource.data.user)
+        && auditRoleMatches(resource.data.actorRole);
+      allow delete: if isAdmin();
+    }
+
+    match /appData/{documentId} {
+      // uiTextSettings berisi copy/label antarmuka saja. Read dibuat publik agar
+      // override login page sudah dapat diterapkan sebelum pengguna login.
+      allow read: if documentId == 'uiTextSettings'
+        || (signedIn() && documentId in ['gl', 'karyawan', 'slaCalendar', 'slaSettings'])
+        || (isAdmin() && documentId == 'activityLogState');
+      allow write: if isAdmin()
+        && documentId in ['gl', 'karyawan', 'slaCalendar', 'slaSettings', 'activityLogState', 'uiTextSettings'];
+    }
+  }
+}
