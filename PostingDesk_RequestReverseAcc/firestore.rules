@@ -1,0 +1,211 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function memberPath(workspace) {
+      return /databases/$(database)/documents/workspaces/$(workspace)/members/$(request.auth.uid);
+    }
+    function requestPath(workspace, id) {
+      return /databases/$(database)/documents/workspaces/$(workspace)/requests/$(id);
+    }
+    function isMember(workspace) {
+      return request.auth != null && exists(memberPath(workspace))
+        && get(memberPath(workspace)).data.active == true
+        && get(memberPath(workspace)).data.role in ['requester', 'poster'];
+    }
+    function isPoster(workspace) {
+      return isMember(workspace) && get(memberPath(workspace)).data.role == 'poster';
+    }
+    function ownName(workspace) { return get(memberPath(workspace)).data.displayName; }
+    function nonemptyName(value) { return value is string && value.size() > 0 && value.size() <= 80; }
+    function identity(data) { return data.operation + '_' + data.entity + '_' + data.fiscalYear + '_' + data.documentNumber; }
+    function canEdit(workspace, data) {
+      return isMember(workspace) && data.status == 'pending' && data.archived == false
+        && (data.createdByUid == request.auth.uid || isPoster(workspace));
+    }
+    function canRemove(workspace, data) {
+      // Delete permission dibuat eksplisit agar requester pemilik request tidak
+      // bergantung pada jalur validasi edit. Poster tetap boleh menghapus semua.
+      return isMember(workspace) && (
+        get(memberPath(workspace)).data.role == 'poster'
+        || (
+          get(memberPath(workspace)).data.role == 'requester'
+          && data.createdByUid == request.auth.uid
+          && data.status == 'pending'
+          && data.archived == false
+        )
+      );
+    }
+    function canRecover(workspace, data) {
+      return isPoster(workspace) || (isMember(workspace) && data.createdByUid == request.auth.uid
+        && data.get('previousStatus', '') == 'pending' && data.archived == false);
+    }
+    function validEditing(data) {
+      let revision = data.get('editRevision', 0);
+      return revision is int && revision >= 0
+        && data.get('editSourceId', '') is string && data.get('editSourceId', '').size() <= 80
+        && ((revision == 0 && data.get('editedAt', null) == null
+          && data.get('editedByUid', '') == '' && data.get('editedByName', '') == '')
+        || (revision > 0 && data.get('editedAt', null) is timestamp && data.editedAt <= request.time
+          && data.get('editedByUid', '') is string && data.editedByUid.size() > 0 && nonemptyName(data.get('editedByName', ''))));
+    }
+    function validDeletion(data) {
+      return (data.status != 'deleted' && data.get('previousStatus', '') == ''
+        && data.get('deletedAt', null) == null && data.get('deletedByUid', '') == '' && data.get('deletedByName', '') == ''
+        && data.get('deleteKind', '') == '' && data.get('replacementId', '') == '')
+      || (data.status == 'deleted' && data.get('previousStatus', '') in ['pending', 'done']
+        && data.get('deletedAt', null) is timestamp && data.deletedAt <= request.time
+        && data.get('deletedByUid', '') is string && data.deletedByUid.size() > 0 && nonemptyName(data.get('deletedByName', ''))
+        && ((data.get('deleteKind', '') == 'user' && data.get('replacementId', '') == '')
+          || (data.get('deleteKind', '') == 'edit' && data.get('replacementId', '') is string
+            && data.replacementId.matches('^(reverse|cancel)_(AIO|ODI)_20[0-9]{2}_[0-9]{10}$'))));
+    }
+    function validRecord(data, id) {
+      let effectiveStatus = data.status == 'deleted' ? data.get('previousStatus', '') : data.status;
+      return data.keys().hasAll([
+        'operation', 'entity', 'fiscalYear', 'documentNumber', 'requester', 'requestDate', 'note',
+        'status', 'archived', 'createdAt', 'createdByUid', 'createdByName', 'updatedAt', 'updatedByUid', 'updatedByName',
+        'completedAt', 'completedByUid', 'completedByName', 'archivedAt', 'archivedByUid', 'archivedByName'
+      ]) && data.keys().hasOnly([
+        'operation', 'entity', 'fiscalYear', 'documentNumber', 'requester', 'requestDate', 'note',
+        'status', 'archived', 'createdAt', 'createdByUid', 'createdByName', 'updatedAt', 'updatedByUid', 'updatedByName',
+        'completedAt', 'completedByUid', 'completedByName', 'archivedAt', 'archivedByUid', 'archivedByName',
+        'editedAt', 'editedByUid', 'editedByName', 'editRevision', 'editSourceId',
+        'previousStatus', 'deletedAt', 'deletedByUid', 'deletedByName', 'deleteKind', 'replacementId'
+      ])
+        && data.operation in ['reverse', 'cancel'] && data.entity in ['AIO', 'ODI']
+        && data.fiscalYear is string && data.fiscalYear.matches('^20[0-9]{2}$')
+        && data.documentNumber is string && data.documentNumber.matches('^[0-9]{10}$') && id == identity(data)
+        && nonemptyName(data.requester) && data.requestDate is string && data.requestDate.matches('^20[0-9]{2}-[0-9]{2}-[0-9]{2}$')
+        && data.note is string && data.note.size() <= 500 && data.status in ['pending', 'done', 'deleted'] && data.archived is bool
+        && data.createdAt is timestamp && data.createdAt <= request.time && data.updatedAt is timestamp
+        && data.createdByUid is string && data.createdByUid.size() > 0 && nonemptyName(data.createdByName)
+        && data.updatedByUid is string && data.updatedByUid.size() > 0 && nonemptyName(data.updatedByName)
+        && validEditing(data) && validDeletion(data)
+        && ((effectiveStatus == 'pending' && data.archived == false && data.completedAt == null && data.completedByUid == '' && data.completedByName == '')
+          || (effectiveStatus == 'done' && data.completedAt is timestamp && data.completedAt <= request.time
+            && data.completedByUid is string && data.completedByUid.size() > 0 && nonemptyName(data.completedByName)))
+        && ((data.archived == false && data.archivedAt == null && data.archivedByUid == '' && data.archivedByName == '')
+          || (data.archived == true && effectiveStatus == 'done' && data.archivedAt is timestamp && data.archivedAt <= request.time
+            && data.archivedByUid is string && data.archivedByUid.size() > 0 && nonemptyName(data.archivedByName)));
+    }
+    function updateActor(workspace) {
+      return request.resource.data.updatedAt == request.time && request.resource.data.updatedByUid == request.auth.uid
+        && request.resource.data.updatedByName == ownName(workspace);
+    }
+    function editedNow(workspace, before, after) {
+      return after.get('editRevision', 0) == before.get('editRevision', 0) + 1
+        && after.editedAt == request.time && after.editedByUid == request.auth.uid && after.editedByName == ownName(workspace);
+    }
+    function normalCreate(workspace, data) {
+      return data.status == 'pending' && data.archived == false && data.createdAt == request.time
+        && data.createdByUid == request.auth.uid && data.createdByName == ownName(workspace)
+        && data.requester == ownName(workspace) && data.get('editRevision', 0) == 0 && data.get('editSourceId', '') == '';
+    }
+    function correctedCreate(workspace, id, data) {
+      let sourceId = data.get('editSourceId', '');
+      let before = get(requestPath(workspace, sourceId)).data;
+      let after = getAfter(requestPath(workspace, sourceId)).data;
+      return sourceId != '' && sourceId != id && canEdit(workspace, before)
+        && data.createdAt == before.createdAt && data.createdByUid == before.createdByUid
+        && data.createdByName == before.createdByName && data.requester == before.requester
+        && data.status == 'pending' && data.archived == false && editedNow(workspace, before, data)
+        && after.status == 'deleted' && after.get('deleteKind', '') == 'edit' && after.get('replacementId', '') == id
+        && after.get('deletedAt', null) == request.time && after.get('deletedByUid', '') == request.auth.uid;
+    }
+    function unchangedCompletion() {
+      return request.resource.data.completedAt == resource.data.completedAt
+        && request.resource.data.completedByUid == resource.data.completedByUid
+        && request.resource.data.completedByName == resource.data.completedByName;
+    }
+    function processUpdate(workspace) {
+      return isPoster(workspace) && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'status', 'archived', 'completedAt', 'completedByUid', 'completedByName',
+        'archivedAt', 'archivedByUid', 'archivedByName', 'updatedAt', 'updatedByUid', 'updatedByName'
+      ]) && (
+        (resource.data.status == 'pending' && resource.data.archived == false && request.resource.data.status == 'done'
+          && request.resource.data.archived == false && request.resource.data.completedAt == request.time
+          && request.resource.data.completedByUid == request.auth.uid && request.resource.data.completedByName == ownName(workspace))
+        || (resource.data.status == 'done' && resource.data.archived == false && request.resource.data.status == 'pending' && request.resource.data.archived == false)
+        || (resource.data.status == 'done' && resource.data.archived == false && request.resource.data.status == 'done' && request.resource.data.archived == true
+          && unchangedCompletion() && request.resource.data.archivedAt == request.time && request.resource.data.archivedByUid == request.auth.uid
+          && request.resource.data.archivedByName == ownName(workspace))
+        || (resource.data.status == 'done' && resource.data.archived == true && request.resource.data.status == 'done' && request.resource.data.archived == false && unchangedCompletion())
+      );
+    }
+    function editUpdate(workspace) {
+      return canEdit(workspace, resource.data) && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'requestDate', 'note', 'updatedAt', 'updatedByUid', 'updatedByName', 'editedAt', 'editedByUid', 'editedByName', 'editRevision'
+      ]) && editedNow(workspace, resource.data, request.resource.data);
+    }
+    function correctionLink(workspace, id, data) {
+      let targetId = data.get('replacementId', '');
+      return canEdit(workspace, resource.data) && targetId != '' && targetId != id && !exists(requestPath(workspace, targetId))
+        && getAfter(requestPath(workspace, targetId)).data.get('editSourceId', '') == id
+        && getAfter(requestPath(workspace, targetId)).data.createdByUid == resource.data.createdByUid;
+    }
+    function removeUpdate(workspace, id) {
+      let after = request.resource.data;
+      return resource.data.status != 'deleted' && canRemove(workspace, resource.data)
+        && after.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'previousStatus', 'deletedAt', 'deletedByUid', 'deletedByName', 'deleteKind', 'replacementId', 'updatedAt', 'updatedByUid', 'updatedByName'
+        ]) && after.status == 'deleted' && after.previousStatus == resource.data.status
+        && after.deletedAt == request.time && after.deletedByUid == request.auth.uid && after.deletedByName == ownName(workspace)
+        && (after.deleteKind == 'user' || (after.deleteKind == 'edit' && correctionLink(workspace, id, after)));
+    }
+
+    // Jalur soft-delete user sengaja berdiri SENDIRI dari validator update umum.
+    // Tujuannya: satu validasi edit/proses yang gagal tidak boleh ikut menggagalkan
+    // tombol Hapus. Otorisasi tetap server-side dan hanya berdasarkan member + UID.
+    function softDeleteUpdate(workspace) {
+      let after = request.resource.data;
+      let before = resource.data;
+      let member = get(memberPath(workspace)).data;
+      return request.auth != null
+        && exists(memberPath(workspace))
+        && member.active == true
+        && member.role in ['requester', 'poster']
+        && before.status != 'deleted'
+        && (
+          member.role == 'poster'
+          || (
+            member.role == 'requester'
+            && before.createdByUid == request.auth.uid
+            && before.status == 'pending'
+            && before.archived == false
+          )
+        )
+        && after.diff(before).affectedKeys().hasOnly([
+          'status', 'previousStatus', 'deletedAt', 'deletedByUid', 'deletedByName', 'deleteKind', 'replacementId',
+          'updatedAt', 'updatedByUid', 'updatedByName'
+        ])
+        && after.status == 'deleted'
+        && after.get('previousStatus', '') == before.status
+        && after.get('deleteKind', '') == 'user'
+        && after.get('replacementId', '') == ''
+        && after.get('deletedByUid', '') == request.auth.uid
+        && after.get('updatedByUid', '') == request.auth.uid;
+    }
+    function recoverUpdate(workspace) {
+      return resource.data.status == 'deleted' && canRecover(workspace, resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'previousStatus', 'deletedAt', 'deletedByUid', 'deletedByName', 'deleteKind', 'replacementId', 'updatedAt', 'updatedByUid', 'updatedByName'
+        ]) && request.resource.data.status == resource.data.previousStatus;
+    }
+    match /workspaces/{workspace}/members/{uid} {
+      allow get: if request.auth != null && request.auth.uid == uid;
+      allow list, create, update, delete: if false;
+    }
+    match /workspaces/{workspace}/requests/{id} {
+      allow read: if isMember(workspace);
+      allow create: if isMember(workspace) && validRecord(request.resource.data, id) && updateActor(workspace)
+        && (normalCreate(workspace, request.resource.data) || correctedCreate(workspace, id, request.resource.data));
+      // Soft-delete dibuat sebagai allow tersendiri agar benar-benar terisolasi
+      // dari validRecord/updateActor dan jalur edit/proses lain.
+      allow update: if softDeleteUpdate(workspace);
+      allow update: if isMember(workspace) && validRecord(request.resource.data, id) && updateActor(workspace)
+        && (processUpdate(workspace) || editUpdate(workspace) || removeUpdate(workspace, id) || recoverUpdate(workspace));
+      allow delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}

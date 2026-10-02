@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Paste request Reverse dan Cancel Park. Entitas, tahun, dan nomor dokumen terbaca otomatis untuk antrean tim posting.">
+  <title>Posting Desk · Request Dokumen</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#workarea">Ke daftar dokumen</a>
+  <div id="gate" class="gate">
+    <section class="gate-card" aria-labelledby="gate-title">
+      <div class="brand-mark" aria-hidden="true">P<span>D</span></div>
+      <p class="eyebrow">POSTING DESK</p>
+      <h1 id="gate-title">Posting jadi<br>lebih ringan.</h1>
+      <p id="gate-description" class="gate-description">Masuk dengan akun tim untuk membuka request dokumen.</p>
+      <form id="login-form" hidden>
+        <label class="field">Email<input id="login-email" type="email" required autocomplete="username" placeholder="nama@perusahaan.com"></label>
+        <label class="field">Password<input id="login-password" type="password" required autocomplete="current-password"></label>
+        <label class="remember-row"><input id="remember-me" type="checkbox" checked><span>Ingat saya <small>Masuk otomatis di perangkat ini</small></span></label>
+        <button id="login-button" class="button button-primary button-full" type="submit" disabled>Masuk</button>
+        <button id="reset-password" class="button button-link" type="button">Lupa password?</button>
+      </form>
+      <div id="gate-message" class="notice" role="status" hidden></div>
+      <button id="retry-connection" type="button" class="button button-secondary button-full" hidden>Coba sambungkan lagi</button>
+      <div id="access-denied" hidden>
+        <p id="denied-description" class="body-small">Akun ini belum mendapat akses ke workspace. Berikan UID berikut kepada admin:</p>
+        <code id="denied-uid" class="uid-code"></code>
+        <button id="denied-logout" type="button" class="button button-secondary button-full">Gunakan akun lain</button>
+      </div>
+      <div class="gate-footer">
+        <button id="demo-button" class="button button-secondary" type="button">Coba tampilan demo</button>
+        <a href="/setup.html" class="text-link">Panduan penggunaan</a>
+      </div>
+    </section>
+    <p class="gate-footnote">Request Reverse &amp; Cancel Park · AIO / ODI</p>
+  </div>
+
+  <div id="app" class="app-shell" hidden>
+    <header class="topbar glass">
+      <a href="/" class="brand" aria-label="Posting Desk"><span class="brand-mark" aria-hidden="true">P<span>D</span></span><span>Posting<span class="brand-second">Desk</span></span><span class="version-tag">3.0.7</span></a>
+      <div class="topbar-right">
+        <span id="sync-state" class="sync-label" role="status">Memuat</span>
+        <a href="/setup.html" class="button-icon guide-link" aria-label="Panduan"><span data-icon="book"></span></a>
+        <div class="profile"><span id="profile-avatar" class="avatar avatar-dark">N</span><div><strong id="profile-name">—</strong><span id="profile-role">—</span></div></div>
+        <button id="logout-button" class="button-icon" type="button" aria-label="Keluar"><span data-icon="logout"></span></button>
+      </div>
+    </header>
+    <main id="workarea" class="workarea">
+      <div id="demo-banner" class="demo-banner" hidden><span><strong>Mode demo</strong> · Data contoh tersimpan di perangkat ini.</span><button id="reset-demo" type="button">Reset demo</button><button id="exit-demo" type="button">Keluar demo</button></div>
+      <div class="page-heading">
+        <div><p class="eyebrow"><span class="live-dot"></span> DOKUMEN / <span id="room-eyebrow">REVERSE</span></p><h1 id="page-title">Request Reverse</h1><p class="page-subtitle">Tempel request. Copy nomor. Bereskan antrean.</p></div>
+        <div class="heading-side"><span class="workspace-label"><span data-icon="layers"></span><span id="workspace-name">Antrean tim posting</span></span><button id="new-request" type="button" class="button button-secondary"><span data-icon="plus"></span>Paste request</button></div>
+      </div>
+      <div class="audience-row"><div class="audience-switch" role="group" aria-label="Ruang request"><button data-audience="team" type="button" aria-pressed="true">Antrean tim</button><button data-audience="mine" type="button" aria-pressed="false"><span data-icon="user"></span>Request saya</button></div><p id="audience-caption">Semua request tim posting</p></div>
+      <nav class="room-nav glass" role="tablist" aria-label="Jenis request">
+        <button id="tab-reverse" class="room-button is-active" data-room="reverse" role="tab" aria-selected="true" aria-controls="request-workspace" tabindex="0" type="button"><span class="room-icon" data-icon="reverse"></span><span>Request Reverse</span><span id="reverse-open-count" class="open-count" aria-label="Request Reverse open">—</span></button>
+        <button id="tab-cancel" class="room-button" data-room="cancel" role="tab" aria-selected="false" aria-controls="request-workspace" tabindex="-1" type="button"><span class="room-icon" data-icon="cancel"></span><span>Cancel Park</span><span id="cancel-open-count" class="open-count" aria-label="Cancel Park open">—</span></button>
+        <span class="room-nav-caption">Badge = open · semua tanggal</span>
+      </nav>
+      <div id="request-workspace" class="work-grid" role="tabpanel" aria-labelledby="tab-reverse">
+        <section class="composer glass" aria-labelledby="composer-title">
+          <div class="composer-heading"><p class="eyebrow">PASTE REQUEST</p><span class="auto-badge"><span data-icon="sparkles"></span>Auto format</span></div>
+          <h2 id="composer-title">Tempel sekaligus.</h2>
+          <p class="composer-subtitle">Nomor berbaris atau dipisah spasi? Jenis, entitas, dan tahun ikut terbaca.</p>
+          <div class="requester-auto"><span id="requester-avatar" class="avatar">N</span><div><span>Requester otomatis</span><strong id="requester-name">—</strong></div><span class="requester-lock" data-icon="lock" aria-label="Dari akun login"></span></div>
+          <form id="request-form">
+            <fieldset id="composer-fields" class="composer-fields">
+              <legend class="sr-only">Request dokumen baru</legend>
+              <label class="sr-only" for="form-documents">Paste jenis request, nomor dokumen, entitas dan tahun</label>
+              <textarea id="form-documents" class="document-input paste-input" rows="8" placeholder="Tempel nomor dokumen di sini…" required spellcheck="false" aria-describedby="paste-help paste-preview"></textarea>
+              <p class="keyboard-hint"><kbd>Enter</kbd> kirim <span>·</span> <kbd>Shift + Enter</kbd> baris baru</p>
+              <div class="paste-toolbar"><span id="paste-help">Maks. 100 nomor · 10 digit</span><button id="format-paste" class="button button-link compact" type="button"><span data-icon="sparkles"></span>Rapikan</button></div>
+              <div id="paste-routing" class="paste-routing" aria-live="polite">
+                <p class="routing-label">AKAN MASUK KE</p>
+                <h3 id="paste-destination">Belum ada nomor</h3>
+                <p id="paste-preview" class="paste-preview">0 nomor siap ditambahkan</p>
+                <div id="paste-entries" class="paste-entries" hidden></div><p id="paste-year-hint" class="paste-year-hint" hidden></p>
+              </div>
+              <details class="input-options"><summary>Detail request <span>Pilihan &amp; catatan</span></summary>
+                <div class="form-grid"><label class="field">Jenis request<span class="app-dropdown" data-dropdown><input id="form-operation" type="hidden" value="reverse"><button type="button" class="dropdown-trigger" aria-label="Jenis request" aria-haspopup="listbox" aria-expanded="false"><span class="dropdown-value">Request Reverse</span><span data-icon="chevron-down"></span></button><span class="dropdown-options" role="listbox" aria-label="Jenis request" hidden><button type="button" role="option" data-value="reverse" aria-selected="true">Request Reverse</button><button type="button" role="option" data-value="cancel" aria-selected="false">Cancel Park</button></span></span></label><label class="field">Tanggal request<span class="app-date" data-date><input id="form-date" type="hidden"><button type="button" class="date-trigger" aria-label="Tanggal request" aria-haspopup="dialog" aria-expanded="false"><span class="date-value">Pilih tanggal</span><span data-icon="calendar"></span></button></span></label><label class="field entity-field">Entitas<span class="app-dropdown" data-dropdown><input id="form-entity" type="hidden" value="AIO"><button type="button" class="dropdown-trigger" aria-label="Entitas" aria-haspopup="listbox" aria-expanded="false"><span class="dropdown-value">AIO</span><span data-icon="chevron-down"></span></button><span class="dropdown-options" role="listbox" aria-label="Entitas" hidden><button type="button" role="option" data-value="AIO" aria-selected="true">AIO</button><button type="button" role="option" data-value="ODI" aria-selected="false">ODI</button></span></span></label><label class="field year-field">Tahun dokumen<input id="form-year" type="number" min="2000" max="2099" required inputmode="numeric"></label></div>
+                <p id="detected-fields" class="field-help">Jika teks hanya berisi nomor, tujuan mengikuti tab dan entitas aktif; tahun memakai tahun berjalan.</p>
+                <label class="field">Catatan <span class="optional">opsional</span><textarea id="form-note" rows="2" maxlength="420" placeholder="Informasi untuk pemosting"></textarea></label>
+              </details>
+              <p id="form-error" class="field-error" role="alert" hidden></p>
+              <button id="save-request" class="button button-primary button-full" type="submit" disabled><span data-icon="plus"></span>Tambahkan ke antrean</button>
+              <button id="clear-paste" class="button button-link button-full" type="button">Kosongkan box</button>
+            </fieldset>
+          </form>
+        </section>
+        <section id="request-board" class="board glass" aria-label="Daftar request">
+          <div class="scope-row"><div class="entity-switch" role="group" aria-label="Entitas"><button type="button" data-entity="AIO" aria-pressed="true">AIO <span id="aio-open-count" class="open-count">—</span></button><button type="button" data-entity="ODI" aria-pressed="false">ODI <span id="odi-open-count" class="open-count">—</span></button></div><span class="scope-caption" id="scope-caption">AIO · bulan aktif</span></div>
+          <div class="view-row"><div class="view-tabs" role="group" aria-label="Status request"><button type="button" data-view="pending" aria-pressed="true" class="is-active">Antrean <span id="pending-count" class="tab-count">0</span></button><button type="button" data-view="done" aria-pressed="false">Selesai <span id="done-count" class="tab-count">0</span></button><button type="button" data-view="archive" aria-pressed="false"><span data-icon="archive"></span>Arsip</button><button type="button" data-view="trash" aria-pressed="false"><span data-icon="trash"></span>Sampah</button></div></div>
+          <div id="period-filter" class="filter-row"><div class="month-index" aria-label="Indeks bulan"><button id="month-prev" type="button" class="button-icon" aria-label="Bulan sebelumnya"><span data-icon="chevron-left"></span></button><strong id="month-index-label">Bulan aktif</strong><button id="month-next" type="button" class="button-icon" aria-label="Bulan berikutnya"><span data-icon="chevron-right"></span></button><button id="month-current" type="button" class="button button-link compact">Bulan ini</button></div><label class="filter-label"><span data-icon="calendar"></span><span>Tanggal request</span><span class="app-dropdown" data-dropdown><input id="date-preset" type="hidden" value="indexed"><button type="button" class="dropdown-trigger" aria-label="Filter tanggal request" aria-haspopup="listbox" aria-expanded="false"><span class="dropdown-value">Bulan aktif</span><span data-icon="chevron-down"></span></button><span class="dropdown-options" role="listbox" aria-label="Filter tanggal request" hidden><button type="button" role="option" data-value="indexed" aria-selected="true">Bulan aktif</button><button type="button" role="option" data-value="today" aria-selected="false">Hari ini</button><button type="button" role="option" data-value="week" aria-selected="false">7 hari terakhir</button><button type="button" role="option" data-value="custom" aria-selected="false">Rentang tanggal</button><button type="button" role="option" data-value="all" aria-selected="false">Semua tanggal · lebih berat</button></span></span></label><div id="custom-range" class="custom-range" hidden><label class="sr-only" for="date-from">Dari tanggal request</label><span class="app-date" data-date><input id="date-from" type="hidden"><button type="button" class="date-trigger" aria-label="Dari tanggal request" aria-haspopup="dialog" aria-expanded="false"><span class="date-value">Pilih tanggal</span><span data-icon="calendar"></span></button></span><span>s.d.</span><label class="sr-only" for="date-to">Sampai tanggal request</label><span class="app-date" data-date><input id="date-to" type="hidden"><button type="button" class="date-trigger" aria-label="Sampai tanggal request" aria-haspopup="dialog" aria-expanded="false"><span class="date-value">Pilih tanggal</span><span data-icon="calendar"></span></button></span></div><button id="reset-date" class="button button-link compact" type="button" hidden>Reset</button><span id="filter-error" class="field-error" role="alert" hidden></span></div>
+          <div id="data-error" class="notice notice-error" role="alert" hidden></div>
+          <div id="year-awareness" class="year-awareness" role="status" hidden><span data-icon="calendar"></span><span id="year-awareness-text"></span></div>
+          <div class="list-heading"><div><p class="eyebrow">DAFTAR DOKUMEN</p><h2 id="list-title">Siap diproses</h2><p id="list-summary" aria-live="polite">Memuat antrean…</p></div><div class="list-heading-actions"><div class="density-switch" role="group" aria-label="Tampilan daftar"><button type="button" data-density="comfortable" aria-pressed="true" title="Tampilan lengkap"><span data-icon="list"></span><span>Lengkap</span></button><button type="button" data-density="compact" aria-pressed="false" title="Tampilan ringkas"><span data-icon="rows"></span><span>Ringkas</span></button></div><button id="copy-filter" type="button" class="button button-copy" disabled><span data-icon="copy"></span><span id="copy-filter-label">Copy nomor</span></button></div></div>
+          <div id="selection-bar" class="selection-bar"><label class="select-all-label"><input id="select-all" type="checkbox"><span id="selection-label">Pilih hasil filter</span></label><div class="selection-actions"><button id="clear-selection" type="button" class="button button-link compact" hidden>Batal pilih</button><button id="bulk-reopen" type="button" class="button button-secondary compact" hidden disabled><span data-icon="undo"></span>Buka kembali</button><button id="bulk-done" type="button" class="button button-secondary compact" disabled><span data-icon="check"></span>Bulk selesai</button><button id="bulk-archive" type="button" class="button button-secondary compact" hidden disabled><span data-icon="archive"></span>Arsipkan dipilih</button><button id="bulk-undelete" type="button" class="button button-secondary compact" hidden disabled><span data-icon="undo"></span>Pulihkan dari Sampah</button><button id="bulk-restore" type="button" class="button button-secondary compact" hidden disabled><span data-icon="undo"></span>Pulihkan</button><button id="bulk-delete" type="button" class="button button-danger compact" hidden disabled><span data-icon="trash"></span>Hapus dipilih</button></div></div>
+          <div class="table-wrap"><table class="request-table" aria-label="Dokumen request"><thead><tr><th class="check-column" scope="col"><span class="sr-only">Pilih</span></th><th class="document-column" scope="col">Nomor dokumen</th><th class="entity-column" scope="col">Entitas</th><th class="year-column" scope="col">Tahun</th><th class="requester-column" scope="col">Requester</th><th class="date-column" scope="col">Tanggal request</th><th scope="col" class="status-column">Cek</th><th scope="col" class="actions-column"><span class="sr-only">Tindakan</span></th></tr></thead><tbody id="request-rows"></tbody></table></div>
+          <div id="empty-state" class="empty-state" hidden><span class="empty-icon" data-icon="inbox"></span><h3 id="empty-title">Antrean bersih</h3><p id="empty-description">Belum ada request untuk pilihan ini.</p><button id="empty-add" class="button button-secondary" type="button">Paste request</button></div>
+          <div class="table-footer"><span id="table-range">—</span><div id="pagination" class="pagination"><button id="page-prev" type="button" class="button-icon" aria-label="Halaman sebelumnya"><span data-icon="chevron-left"></span></button><span id="page-label">1 / 1</span><button id="page-next" type="button" class="button-icon" aria-label="Halaman berikutnya"><span data-icon="chevron-right"></span></button></div><button id="load-archive" class="button button-link compact" type="button" hidden>Muat arsip lebih lama</button></div>
+        </section>
+      </div>
+      <p class="workspace-footnote"><span data-icon="info"></span><span id="context-hint">Semua tahun tampil bersama. Tahun di luar tahun berjalan ditandai pada tiap dokumen.</span></p>
+    </main>
+  </div>
+
+  <dialog id="confirm-dialog" class="modal">
+    <div class="modal-header"><div><p class="eyebrow" id="confirm-eyebrow">BULK SELESAI</p><h2 id="confirm-title">Tandai dokumen selesai?</h2></div><button data-close="confirm-dialog" class="button-icon" type="button" aria-label="Tutup konfirmasi"><span data-icon="close"></span></button></div>
+    <div class="modal-body"><div id="confirm-scope" class="confirmation-scope"></div><p id="confirm-description"></p><div id="confirm-numbers" class="number-chips"></div><p id="confirm-error" class="field-error" role="alert" hidden></p></div>
+    <div class="modal-footer"><button data-close="confirm-dialog" class="button button-secondary" type="button">Batal</button><button id="confirm-action" class="button button-primary" type="button">Selesaikan dokumen</button></div>
+  </dialog>
+
+  <dialog id="copy-dialog" class="modal">
+    <div class="modal-header"><div><p class="eyebrow">COPY DOKUMEN</p><h2 id="copy-title">Nomor siap diproses</h2></div><button data-close="copy-dialog" type="button" class="button-icon" aria-label="Tutup daftar copy"><span data-icon="close"></span></button></div>
+    <div class="modal-body"><p id="copy-scope" class="body-small"></p><p id="copy-year-hint" class="year-notice" hidden></p><label class="sr-only" for="copy-text">Nomor dokumen, satu nomor per baris</label><textarea id="copy-text" class="document-input copy-input" readonly rows="8" spellcheck="false"></textarea><p id="copy-result" class="copy-result" role="status"></p><p class="field-help">Hanya nomor dokumen. Cek selesai dilakukan setelah proses berhasil.</p></div>
+    <div class="modal-footer"><button data-close="copy-dialog" class="button button-secondary" type="button">Tutup</button><button id="copy-again" type="button" class="button button-primary"><span data-icon="copy"></span>Copy daftar</button></div>
+  </dialog>
+
+  <dialog id="detail-dialog" class="modal">
+    <div class="modal-header"><div><p class="eyebrow">DETAIL DOKUMEN</p><h2 id="detail-number" class="mono">—</h2></div><button data-close="detail-dialog" type="button" class="button-icon" aria-label="Tutup detail"><span data-icon="close"></span></button></div>
+    <div class="modal-body"><div id="detail-status"></div><dl id="detail-facts" class="detail-facts"></dl><div id="detail-note-section" class="detail-note" hidden><h3>Catatan</h3><p id="detail-note"></p></div></div><div class="modal-footer"><button data-close="detail-dialog" type="button" class="button button-secondary">Tutup</button><button id="detail-delete" type="button" class="button button-danger" hidden><span data-icon="trash"></span>Hapus</button><button id="detail-edit" type="button" class="button button-secondary" hidden><span data-icon="edit"></span>Edit</button><button id="detail-action" type="button" class="button button-primary" hidden>Selesaikan</button></div>
+  </dialog>
+
+  <dialog id="edit-dialog" class="modal edit-modal">
+    <form id="edit-form">
+      <div class="modal-header"><div><p class="eyebrow">EDIT REQUEST</p><h2>Perbaiki dokumen.</h2></div><button data-close="edit-dialog" type="button" class="button-icon" aria-label="Tutup editor"><span data-icon="close"></span></button></div>
+      <div class="modal-body"><p id="edit-owner" class="edit-owner"></p><fieldset id="edit-fields" class="composer-fields"><legend class="sr-only">Data dokumen</legend>
+        <label class="field">Nomor dokumen<input id="edit-number" type="text" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" required autocomplete="off"></label>
+        <div class="form-grid"><label class="field">Jenis request<span class="app-dropdown" data-dropdown><input id="edit-operation" type="hidden" value="reverse"><button type="button" class="dropdown-trigger" aria-label="Jenis request" aria-haspopup="listbox" aria-expanded="false"><span class="dropdown-value">Request Reverse</span><span data-icon="chevron-down"></span></button><span class="dropdown-options" role="listbox" aria-label="Jenis request" hidden><button type="button" role="option" data-value="reverse" aria-selected="true">Request Reverse</button><button type="button" role="option" data-value="cancel" aria-selected="false">Cancel Park</button></span></span></label><label class="field">Tanggal request<span class="app-date" data-date><input id="edit-date" type="hidden"><button type="button" class="date-trigger" aria-label="Tanggal request" aria-haspopup="dialog" aria-expanded="false"><span class="date-value">Pilih tanggal</span><span data-icon="calendar"></span></button></span></label><label class="field entity-field">Entitas<span class="app-dropdown" data-dropdown><input id="edit-entity" type="hidden" value="AIO"><button type="button" class="dropdown-trigger" aria-label="Entitas" aria-haspopup="listbox" aria-expanded="false"><span class="dropdown-value">AIO</span><span data-icon="chevron-down"></span></button><span class="dropdown-options" role="listbox" aria-label="Entitas" hidden><button type="button" role="option" data-value="AIO" aria-selected="true">AIO</button><button type="button" role="option" data-value="ODI" aria-selected="false">ODI</button></span></span></label><label class="field year-field">Tahun dokumen<input id="edit-year" type="number" min="2000" max="2099" required inputmode="numeric"></label></div>
+        <label class="field">Catatan<textarea id="edit-note" maxlength="500" rows="3"></textarea></label><p id="edit-audit" class="field-help"></p>
+      </fieldset><p id="edit-error" class="field-error" role="alert" hidden></p></div>
+      <div class="modal-footer"><button data-close="edit-dialog" type="button" class="button button-secondary">Batal</button><button id="save-edit" type="submit" class="button button-primary">Simpan perubahan</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <noscript><p class="notice">Aktifkan JavaScript untuk memakai Posting Desk.</p></noscript>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
