@@ -1,6 +1,6 @@
-import { assertBulk, createRecord, matchesScope, openCounts, recordId, shiftDate, sortRows, todayJakarta, transitionPatch, validateBatch, editRecord, timestampMillis } from './domain.js';
+import { assertBulk, createRecord, matchesScope, openCounts, parseSearch, recordId, shiftDate, sortRows, todayJakarta, transitionPatch, validateBatch, editRecord, timestampMillis } from './domain.js';
 
-const KEY = 'posting-desk-demo-v3';
+const KEY = 'posting-desk-demo-v31';
 const actor = Object.freeze({ uid: 'demo-poster', displayName: 'Nisa', email: 'demo@posting.local', role: 'poster' });
 const subscribers = new Set();
 let memory = null;
@@ -66,8 +66,10 @@ export function connectDemo() {
       const records = draft.records.map(row => createRecord(row, row.documentNumber, actor, Date.now()));
       const duplicate = records.find(record => current.some(row => row.id === recordId(record)));
       if (duplicate) throw new Error(`Dokumen ${duplicate.documentNumber} sudah tercatat. Cek Antrean, Selesai, Arsip, atau Sampah.`);
+      const numbers = new Set(records.map(record => record.documentNumber));
+      const related = current.filter(row => numbers.has(row.documentNumber) && row.status !== 'deleted');
       save([...current, ...records.map(record => ({ ...record, id: recordId(record) }))]);
-      return { added: records.length, duplicates: draft.duplicates.length };
+      return { added: records.length, duplicates: draft.duplicates.length, related };
     },
     async mutate(ids, action, scope, knownRows = []) {
       assertBulk(ids, actor, action);
@@ -87,8 +89,19 @@ export function connectDemo() {
       const now = Date.now(), corrected = editRecord(current, input, actor, now), nextId = recordId(corrected);
       if (nextId !== id && rows.some(row => row.id === nextId)) throw new Error('Dokumen tersebut sudah tercatat. Cek juga Arsip dan Sampah.');
       if (nextId === id) save(rows.map(row => row.id === id ? corrected : row));
-      else save([...rows.map(row => row.id === id ? { ...row, ...transitionPatch(row, 'delete', actor, now), deleteKind: 'edit', replacementId: nextId } : row), { ...corrected, id: nextId, editSourceId: id }]);
-      return { id: nextId, operation: corrected.operation, entity: corrected.entity };
+      else save([...rows.map(row => row.id === id ? { ...row, ...transitionPatch(row, 'delete', actor, now, `Diganti saat edit → ${nextId}`), deleteKind: 'edit', replacementId: nextId } : row), { ...corrected, id: nextId, editSourceId: id }]);
+      return { id: nextId, operation: corrected.operation, entity: corrected.entity, requestDate: corrected.requestDate };
+    },
+    async findDocuments(text) {
+      const search = parseSearch(text);
+      if (search.error) throw new Error(search.error);
+      if (search.exact.length) {
+        const wanted = new Set(search.exact), rows = load().filter(row => wanted.has(row.documentNumber));
+        const hit = new Set(rows.map(row => row.documentNumber));
+        return { rows: sortRows(rows), missing: search.exact.filter(number => !hit.has(number)), truncated: false, search };
+      }
+      const rows = load().filter(row => row.documentNumber.startsWith(search.prefix)).sort((a, b) => a.documentNumber.localeCompare(b.documentNumber));
+      return { rows: rows.slice(0, 50), missing: [], truncated: rows.length > 50, search };
     }
   };
   return { actor, repository, reset() { save(samples()); } };

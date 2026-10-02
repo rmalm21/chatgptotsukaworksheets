@@ -50,6 +50,13 @@ test('controller: mixed-year copy/bulk/archive and smart paste routing with auto
     assert.equal(ids['list-summary'].textContent.includes('Oktober 2026'), false);
     assert.equal(ids['period-filter'].hidden, true);
     assert.equal(ids['requester-name'].textContent, 'Nisa');
+    ids['search-number'].value = '4417'; ids['search-number'].handlers.input();
+    assert.match(ids['list-summary'].textContent, /^2 dokumen · cocok “4417” dari 6/);
+    ids['search-number'].value = '5000044176 5000044177'; ids['search-form'].handlers.submit({preventDefault(){}}); for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(ids['search-dialog'].open, true); assert.match(ids['search-summary'].textContent, /^2 catatan untuk 2 nomor/);
+    assert.match(ids['search-results'].innerHTML, /data-search-jump=/); ids['search-dialog'].close();
+    ids['search-number'].value = ''; ids['search-number'].handlers.input();
+    assert.match(ids['list-summary'].textContent, /^6 dokumen/);
     ids['date-preset'].value = 'all'; ids['date-preset'].handlers.change();
     assert.match(ids['list-summary'].textContent, /^6 dokumen/);
     assert.equal(ids['year-awareness'].hidden, false); assert.match(ids['request-rows'].innerHTML, /tahun lain/);
@@ -105,7 +112,7 @@ test('controller: mixed-year copy/bulk/archive and smart paste routing with auto
     ids['detail-edit'].handlers.click(); ids['edit-note'].value='Perbaikan dari user';
     await ids['edit-form'].handlers.submit({preventDefault(){}});
     assert.match(ids['request-rows'].innerHTML,/Diedit/);
-    handlers.click({target}); assert.match(ids['detail-facts'].innerHTML,/Terakhir diedit/); assert.equal(ids['detail-note'].textContent,'Perbaikan dari user');
+    handlers.click({target}); assert.match(ids['detail-trail'].innerHTML,/Diedit/); assert.match(ids['detail-trail'].innerHTML,/Catatan diubah/); assert.equal(ids['detail-note'].textContent,'Perbaikan dari user');
     ids['detail-delete'].handlers.click(); await ids['confirm-action'].handlers.click();
     assert.match(ids['list-summary'].textContent,/^3 dokumen/); assert.equal(ids['odi-open-count'].textContent,3);
     const trash=controls.view.find(e=>e.dataset.view==='trash'); handlers.click({target:trash});

@@ -3,6 +3,9 @@ export const MAX_BULK = 250;
 export const PAGE_SIZE = 25;
 export const TYPES = Object.freeze({ reverse: 'Request Reverse', cancel: 'Cancel Park' });
 export const ACTIONS = Object.freeze({ done: 'selesai', reopen: 'buka kembali', archive: 'arsipkan', restore: 'pulihkan', delete: 'dipindahkan ke Sampah', undelete: 'dipulihkan dari Sampah' });
+export const MAX_SEARCH = 100;
+export const TRAIL_LABELS = Object.freeze({ create: 'Dicatat', done: 'Ditandai selesai', reopen: 'Dibuka kembali', archive: 'Diarsipkan', restore: 'Dipulihkan dari Arsip', delete: 'Dipindahkan ke Sampah', undelete: 'Dipulihkan dari Sampah', edit: 'Diedit' });
+const TRAIL_INFO_MAX = 300;
 
 export function todayJakarta(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
@@ -135,6 +138,76 @@ export function recordId({ operation, entity, fiscalYear, documentNumber }) {
   return `${operation}_${entity}_${fiscalYear}_${documentNumber}`;
 }
 
+// Cari nomor: angka 10 digit dicari persis (bisa banyak sekaligus); 4–9 digit dicari sebagai awalan.
+export function parseSearch(input) {
+  const groups = String(input ?? '').normalize('NFKC').match(/\d+/g) || [];
+  const exact = [...new Set(groups.filter(value => value.length === 10))];
+  const partial = [...new Set(groups.filter(value => value.length !== 10))];
+  const prefix = !exact.length && partial.length === 1 && partial[0].length >= 4 && partial[0].length < 10 ? partial[0] : '';
+  let error = '';
+  if (!groups.length) error = 'Ketik atau tempel nomor dokumen.';
+  else if (exact.length > MAX_SEARCH) error = `Maksimal ${MAX_SEARCH} nomor per pencarian.`;
+  else if (!exact.length && !prefix) error = 'Ketik minimal 4 digit awal, atau nomor lengkap 10 digit.';
+  return { terms: [...exact, ...partial], exact: exact.slice(0, MAX_SEARCH), prefix, error };
+}
+
+// Filter lokal untuk daftar yang sudah dimuat: tanpa read Firestore tambahan.
+export function matchesSearch(row, terms) {
+  return !terms?.length || terms.some(term => String(row.documentNumber || '').includes(term));
+}
+
+export const trailKey = sequence => `e${sequence}`;
+
+// Jejak aktivitas per dokumen. Disimpan sebagai map (bukan array) karena
+// serverTimestamp tidak didukung di dalam array Firestore.
+export function appendTrail(row, action, actor, now, info = '') {
+  const sequence = (Number(row?.trailCount) || 0) + 1;
+  const entry = { a: action, at: now, uid: actor.uid, name: actor.displayName };
+  const text = String(info || '').trim().slice(0, TRAIL_INFO_MAX);
+  if (text) entry.info = text;
+  return { trailCount: sequence, trail: { ...(row?.trail || {}), [trailKey(sequence)]: entry } };
+}
+
+const STATUS_LABELS = { pending: 'Antrean', done: 'Selesai' };
+export function statusLabel(row) {
+  if (row.status === 'deleted') return 'Sampah';
+  if (row.archived) return 'Arsip';
+  return STATUS_LABELS[row.status] || row.status || '—';
+}
+export function rowView(row) {
+  return row.status === 'deleted' ? 'trash' : row.archived ? 'archive' : row.status === 'done' ? 'done' : 'pending';
+}
+
+// Riwayat lengkap untuk detail/pencarian. Dokumen lama (sebelum v3.1) belum punya
+// trail, jadi kejadian terakhir yang masih tersimpan di field audit ditampilkan sebagai jejak lama.
+export function traceOf(row) {
+  const entries = Object.entries(row?.trail || {})
+    .map(([key, value]) => ({ seq: Number(key.slice(1)) || 0, action: value?.a, at: value?.at, name: value?.name || '', info: value?.info || '', legacy: false }))
+    .filter(entry => entry.seq > 0 && entry.action)
+    .sort((a, b) => a.seq - b.seq);
+  const legacy = [];
+  if (!entries.some(entry => entry.action === 'create')) legacy.push({ action: 'create', at: row.createdAt, name: row.createdByName || row.requester || '', info: '' });
+  if (!entries.length) {
+    if (row.editedAt) legacy.push({ action: 'edit', at: row.editedAt, name: row.editedByName, info: '' });
+    if (row.completedAt) legacy.push({ action: 'done', at: row.completedAt, name: row.completedByName, info: '' });
+    if (row.archivedAt) legacy.push({ action: 'archive', at: row.archivedAt, name: row.archivedByName, info: '' });
+    if (row.deletedAt) legacy.push({ action: 'delete', at: row.deletedAt, name: row.deletedByName, info: row.deleteKind === 'edit' ? `Diganti saat edit → ${row.replacementId}` : '' });
+    legacy.sort((a, b) => timestampMillis(a.at) - timestampMillis(b.at));
+  }
+  return [...legacy.map(entry => ({ ...entry, seq: 0, legacy: true })), ...entries];
+}
+
+function editSummary(row, next) {
+  const changes = [];
+  if (row.documentNumber !== next.documentNumber) changes.push(`Nomor ${row.documentNumber} → ${next.documentNumber}`);
+  if (row.operation !== next.operation) changes.push(`Jenis ${TYPES[row.operation] || row.operation} → ${TYPES[next.operation]}`);
+  if (row.entity !== next.entity) changes.push(`Entitas ${row.entity} → ${next.entity}`);
+  if (String(row.fiscalYear) !== String(next.fiscalYear)) changes.push(`Tahun ${row.fiscalYear} → ${next.fiscalYear}`);
+  if (row.requestDate !== next.requestDate) changes.push(`Tanggal ${row.requestDate} → ${next.requestDate}`);
+  if (String(row.note || '') !== String(next.note || '')) changes.push('Catatan diubah');
+  return changes.length ? changes.join(' · ') : 'Tanpa perubahan data';
+}
+
 export function validateDraft(draft) {
   if (!Object.hasOwn(TYPES, draft.operation)) throw new Error('Pilih jenis request.');
   if (!['AIO', 'ODI'].includes(draft.entity)) throw new Error('Pilih entitas AIO atau ODI.');
@@ -244,11 +317,11 @@ export function canTransition(row, action) {
   return false;
 }
 
-export function transitionPatch(row, action, actor, now) {
+export function transitionPatch(row, action, actor, now, info = '') {
   if (!canTransition(row, action)) return null;
   if (action === 'delete' && !canDelete(row, actor)) throw new Error('Hanya pemilik request yang masih open atau pemosting yang boleh menghapus.');
   if (action === 'undelete' && !canRestoreTrash(row, actor)) throw new Error('Akun ini belum boleh memulihkan dokumen tersebut.');
-  const patch = { updatedAt: now, updatedByUid: actor.uid, updatedByName: actor.displayName };
+  const patch = { updatedAt: now, updatedByUid: actor.uid, updatedByName: actor.displayName, ...appendTrail(row, action, actor, now, info) };
   if (action === 'delete') return { ...patch, status: 'deleted', previousStatus: row.status, deletedAt: now, deletedByUid: actor.uid, deletedByName: actor.displayName, deleteKind: 'user', replacementId: '' };
   if (action === 'undelete') return { ...patch, status: row.previousStatus, previousStatus: '', deletedAt: null, deletedByUid: '', deletedByName: '', deleteKind: '', replacementId: '' };
   if (action === 'done') return { ...patch, status: 'done', completedAt: now, completedByUid: actor.uid, completedByName: actor.displayName };
@@ -262,10 +335,14 @@ export function editRecord(row, input, actor, now) {
   if (!/^\d{10}$/.test(String(input.documentNumber))) throw new Error('Nomor dokumen harus tepat 10 digit.');
   const note = String(input.note || '').replace(/Input campuran AIO\/ODI · dokumen ini (?:AIO|ODI)\./g, `Input campuran AIO/ODI · dokumen ini ${input.entity}.`);
   const draft = validateDraft({ ...input, note, documents: input.documentNumber, requester: row.requester });
-  return { ...row, operation: draft.operation, entity: draft.entity, fiscalYear: draft.fiscalYear,
-    documentNumber: draft.documents[0], requestDate: draft.requestDate, note: draft.note,
+  const next = { operation: draft.operation, entity: draft.entity, fiscalYear: draft.fiscalYear,
+    documentNumber: draft.documents[0], requestDate: draft.requestDate, note: draft.note };
+  const previousId = recordId(row), nextId = recordId(next);
+  const info = editSummary(row, next) + (previousId !== nextId ? ` · dari ${previousId}` : '');
+  return { ...row, ...next,
     updatedAt: now, updatedByUid: actor.uid, updatedByName: actor.displayName,
-    editedAt: now, editedByUid: actor.uid, editedByName: actor.displayName, editRevision: (row.editRevision || 0) + 1 };
+    editedAt: now, editedByUid: actor.uid, editedByName: actor.displayName, editRevision: (row.editRevision || 0) + 1,
+    ...appendTrail(row, 'edit', actor, now, info) };
 }
 
 export function createRecord(draft, documentNumber, actor, now) {
@@ -278,7 +355,8 @@ export function createRecord(draft, documentNumber, actor, now) {
     completedAt: null, completedByUid: '', completedByName: '',
     archivedAt: null, archivedByUid: '', archivedByName: '',
     editedAt: null, editedByUid: '', editedByName: '', editRevision: 0, editSourceId: '',
-    previousStatus: '', deletedAt: null, deletedByUid: '', deletedByName: '', deleteKind: '', replacementId: ''
+    previousStatus: '', deletedAt: null, deletedByUid: '', deletedByName: '', deleteKind: '', replacementId: '',
+    ...appendTrail(null, 'create', actor, now)
   };
 }
 

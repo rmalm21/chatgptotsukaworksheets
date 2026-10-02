@@ -1,12 +1,39 @@
-import { assertBulk, createRecord, editRecord, matchesScope, recordId, timestampMillis, transitionPatch, validateBatch } from './domain.js';
+import { TYPES, assertBulk, createRecord, editRecord, matchesScope, parseSearch, recordId, sortRows, statusLabel, timestampMillis, trailKey, transitionPatch, validateBatch } from './domain.js';
 
-// Repository v3.0.7: Antrean membaca hanya status pending tanpa batas periode.
+// Repository v3.1: Antrean membaca hanya status pending tanpa batas periode.
 // Selesai dan Arsip memakai rentang tanggal aktif; Sampah tetap on-demand dan bounded.
 // Counter memakai aggregation count dan bulk mutation memakai writeBatch agar hemat read.
+// Cari nomor memakai index single-field bawaan `documentNumber` (tanpa index komposit baru).
+const IN_CHUNK = 30;
+const PREFIX_LIMIT = 50;
+
+// Update cukup menambah satu entri trail lewat field path `trail.eN`, bukan menulis ulang seluruh map.
+export function trailFieldUpdate(patch) {
+  if (!patch?.trail || !patch.trailCount) return patch;
+  const { trail, ...rest } = patch;
+  const key = trailKey(patch.trailCount);
+  return { ...rest, [`trail.${key}`]: trail[key] };
+}
+
+export function describeRecord(row) {
+  return `${row.documentNumber} (${TYPES[row.operation] || row.operation} ${row.entity} ${row.fiscalYear} · ${statusLabel(row)})`;
+}
+
 export function createFirestoreRepository(sdk, db, workspaceId, actor) {
   const collectionRef = sdk.collection(db, 'workspaces', workspaceId, 'requests');
   const refFor = id => sdk.doc(collectionRef, id);
   const online = () => { if (globalThis.navigator?.onLine === false) throw new Error('Hubungkan internet sebelum mengubah data.'); };
+  const fetchServer = q => sdk.getDocsFromServer ? sdk.getDocsFromServer(q) : sdk.getDocs(q);
+  const rowsOf = snapshot => { const rows = []; snapshot.forEach(item => rows.push({ ...item.data(), id: item.id })); return rows; };
+
+  async function byNumbers(numbers) {
+    const rows = [];
+    for (let index = 0; index < numbers.length; index += IN_CHUNK) {
+      const q = sdk.query(collectionRef, sdk.where('documentNumber', 'in', numbers.slice(index, index + IN_CHUNK)));
+      rows.push(...rowsOf(await fetchServer(q)));
+    }
+    return rows;
+  }
 
   function subscribe(scope, receive, fail) {
     const filters = [sdk.where('operation', '==', scope.operation), sdk.where('entity', '==', scope.entity)];
@@ -69,16 +96,13 @@ export function createFirestoreRepository(sdk, db, workspaceId, actor) {
     const draft = validateBatch({ ...input, requester: actor.displayName });
     const ids = draft.records.map(row => recordId(row));
 
-    // Cek duplicate via documentId query dalam chunk. Dokumen yang tidak ada tidak
-    // perlu dibaca satu per satu seperti transaction.get versi lama.
-    const existing = [];
-    for (let index = 0; index < ids.length; index += 30) {
-      const chunk = ids.slice(index, index + 30);
-      const q = sdk.query(collectionRef, sdk.where(sdk.documentId(), 'in', chunk));
-      const snapshot = sdk.getDocsFromServer ? await sdk.getDocsFromServer(q) : await sdk.getDocs(q);
-      snapshot.forEach(item => existing.push(item.data().documentNumber || item.id));
-    }
-    if (existing.length) throw new Error(`Sudah tercatat: ${existing.slice(0, 5).join(', ')}. Cek Antrean, Selesai, Arsip, atau Sampah. Belum ada nomor baru yang disimpan.`);
+    // Cek duplicate per nomor (bukan per ID) dalam chunk: identitas sama memblokir batch,
+    // nomor yang sama di jenis/entitas/tahun lain dilaporkan sebagai info keterlacakan.
+    const idSet = new Set(ids);
+    const found = await byNumbers([...new Set(draft.records.map(row => row.documentNumber))]);
+    const existing = found.filter(row => idSet.has(row.id));
+    if (existing.length) throw new Error(`Sudah tercatat: ${existing.slice(0, 5).map(describeRecord).join(', ')}${existing.length > 5 ? ` +${existing.length - 5} lainnya` : ''}. Belum ada nomor baru yang disimpan.`);
+    const related = found.filter(row => row.status !== 'deleted');
 
     const batch = sdk.writeBatch(db);
     const now = sdk.serverTimestamp();
@@ -91,7 +115,7 @@ export function createFirestoreRepository(sdk, db, workspaceId, actor) {
       }
       throw error;
     }
-    return { added: ids.length, duplicates: draft.duplicates.length };
+    return { added: ids.length, duplicates: draft.duplicates.length, related: related.map(row => ({ ...row })) };
   }
 
   async function mutate(ids, action, scope, knownRows = []) {
@@ -100,15 +124,13 @@ export function createFirestoreRepository(sdk, db, workspaceId, actor) {
     const now = sdk.serverTimestamp();
     const batch = sdk.writeBatch(db);
     let changed = 0, skipped = 0;
-    const deleteDebug = [];
 
     for (const id of ids) {
       const row = rowMap.get(id);
       if (!row || !matchesScope(row, scope)) { skipped++; continue; }
-      if (action === 'delete') deleteDebug.push({ ownerUid: row.createdByUid || '', status: row.status || '', archived: row.archived === true });
       const patch = transitionPatch(row, action, actor, now);
       if (!patch) { skipped++; continue; }
-      batch.update(refFor(id), patch); changed++;
+      batch.update(refFor(id), trailFieldUpdate(patch)); changed++;
     }
     if (!changed) return { changed, skipped };
     try {
@@ -116,12 +138,8 @@ export function createFirestoreRepository(sdk, db, workspaceId, actor) {
       return { changed, skipped };
     } catch (error) {
       const code = String(error?.code || '');
-      if (action === 'delete' && code.includes('permission-denied')) {
-        const first = deleteDebug[0] || {};
-        throw new Error(`Server masih menolak Hapus. Akun terbaca: ${actor.displayName} · role=${actor.role} · uid=${actor.uid}. Request terbaca: owner=${first.ownerUid || '—'} · status=${first.status || '—'} · archived=${String(first.archived ?? '—')}. Rules yang dibutuhkan: v3.0.4+.`);
-      }
       if (code.includes('permission-denied') || code.includes('failed-precondition')) {
-        throw new Error('Data di server berubah atau tindakan tidak lagi diizinkan. Daftar akan menyinkron otomatis; coba lagi setelah status terbaru muncul.');
+        throw new Error('Data di server berubah atau tindakan tidak lagi diizinkan. Daftar akan menyinkron otomatis; coba lagi setelah status terbaru muncul. Jika tetap gagal, muat ulang halaman (rules v3.1 membutuhkan aplikasi v3.1).');
       }
       throw error;
     }
@@ -138,16 +156,30 @@ export function createFirestoreRepository(sdk, db, workspaceId, actor) {
       const now = sdk.serverTimestamp();
       const corrected = editRecord(current, input, actor, now);
       const nextId = recordId(corrected);
-      if (nextId === id) transaction.update(refFor(id), corrected);
+      if (nextId === id) transaction.update(refFor(id), trailFieldUpdate(corrected));
       else {
         const target = await transaction.get(refFor(nextId));
         if (target.exists()) throw new Error('Nomor, entitas, jenis, dan tahun tersebut sudah tercatat. Cek juga Arsip dan Sampah.');
-        transaction.update(refFor(id), { ...transitionPatch(current, 'delete', actor, now), deleteKind: 'edit', replacementId: nextId });
+        transaction.update(refFor(id), trailFieldUpdate({ ...transitionPatch(current, 'delete', actor, now, `Diganti saat edit → ${nextId}`), deleteKind: 'edit', replacementId: nextId }));
         transaction.set(refFor(nextId), { ...corrected, editSourceId: id });
       }
       return { id: nextId, operation: corrected.operation, entity: corrected.entity, requestDate: corrected.requestDate };
     });
   }
 
-  return { subscribe, getOpenCounts, addRequests, mutate, editRequest };
+  // Cari nomor di semua jenis, entitas, tahun, dan status (termasuk Sampah).
+  async function findDocuments(text) {
+    const search = parseSearch(text);
+    if (search.error) throw new Error(search.error);
+    if (search.exact.length) {
+      const rows = await byNumbers(search.exact);
+      const hit = new Set(rows.map(row => row.documentNumber));
+      return { rows: sortRows(rows), missing: search.exact.filter(number => !hit.has(number)), truncated: false, search };
+    }
+    const q = sdk.query(collectionRef, sdk.where('documentNumber', '>=', search.prefix), sdk.where('documentNumber', '<=', `${search.prefix}\uf8ff`), sdk.orderBy('documentNumber'), sdk.limit(PREFIX_LIMIT + 1));
+    const rows = rowsOf(await fetchServer(q));
+    return { rows: rows.slice(0, PREFIX_LIMIT), missing: [], truncated: rows.length > PREFIX_LIMIT, search };
+  }
+
+  return { subscribe, getOpenCounts, addRequests, mutate, editRequest, findDocuments };
 }

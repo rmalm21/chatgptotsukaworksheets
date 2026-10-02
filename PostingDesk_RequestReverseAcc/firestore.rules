@@ -12,31 +12,24 @@ service cloud.firestore {
         && get(memberPath(workspace)).data.active == true
         && get(memberPath(workspace)).data.role in ['requester', 'poster'];
     }
-    function isPoster(workspace) {
-      return isMember(workspace) && get(memberPath(workspace)).data.role == 'poster';
+    // Profil anggota dibaca sekali per evaluasi lalu diteruskan sebagai argumen, dan jenis
+    // transisi dihitung sekali. Tanpa ini, validasi trail v3.1 melewati batas 1000 ekspresi rules.
+    function memberOf(workspace) { return get(memberPath(workspace)).data; }
+    function activeMember(member) {
+      return member.active == true && member.role in ['requester', 'poster'];
     }
-    function ownName(workspace) { return get(memberPath(workspace)).data.displayName; }
     function nonemptyName(value) { return value is string && value.size() > 0 && value.size() <= 80; }
     function identity(data) { return data.operation + '_' + data.entity + '_' + data.fiscalYear + '_' + data.documentNumber; }
-    function canEdit(workspace, data) {
-      return isMember(workspace) && data.status == 'pending' && data.archived == false
-        && (data.createdByUid == request.auth.uid || isPoster(workspace));
+    function canEdit(member, data) {
+      return data.status == 'pending' && data.archived == false
+        && (data.createdByUid == request.auth.uid || member.role == 'poster');
     }
-    function canRemove(workspace, data) {
-      // Delete permission dibuat eksplisit agar requester pemilik request tidak
-      // bergantung pada jalur validasi edit. Poster tetap boleh menghapus semua.
-      return isMember(workspace) && (
-        get(memberPath(workspace)).data.role == 'poster'
-        || (
-          get(memberPath(workspace)).data.role == 'requester'
-          && data.createdByUid == request.auth.uid
-          && data.status == 'pending'
-          && data.archived == false
-        )
-      );
+    function canRemove(member, data) {
+      return member.role == 'poster'
+        || (data.createdByUid == request.auth.uid && data.status == 'pending' && data.archived == false);
     }
-    function canRecover(workspace, data) {
-      return isPoster(workspace) || (isMember(workspace) && data.createdByUid == request.auth.uid
+    function canRecover(member, data) {
+      return member.role == 'poster' || (data.createdByUid == request.auth.uid
         && data.get('previousStatus', '') == 'pending' && data.archived == false);
     }
     function validEditing(data) {
@@ -59,6 +52,19 @@ service cloud.firestore {
           || (data.get('deleteKind', '') == 'edit' && data.get('replacementId', '') is string
             && data.replacementId.matches('^(reverse|cancel)_(AIO|ODI)_20[0-9]{2}_[0-9]{10}$'))));
     }
+    // Jejak aktivitas v3.1: setiap tulis wajib menambah tepat satu entri `trail.e<N>`
+    // dengan waktu server, UID, dan nama akun sendiri. Entri lama tidak boleh diubah/dihapus.
+    function trailAppended(member, before, after, action) {
+      let sequence = before.get('trailCount', 0) + 1;
+      let key = 'e' + string(sequence);
+      let change = after.get('trail', {}).diff(before.get('trail', {}));
+      let entry = after.get('trail', {}).get(key, {});
+      return after.get('trailCount', 0) == sequence
+        && change.affectedKeys() == [key].toSet() && change.addedKeys() == [key].toSet()
+        && entry.keys().hasAll(['a', 'at', 'uid', 'name']) && entry.keys().hasOnly(['a', 'at', 'uid', 'name', 'info'])
+        && entry.a == action && entry.at == request.time && entry.uid == request.auth.uid
+        && entry.name == member.displayName && entry.get('info', '') is string && entry.get('info', '').size() <= 300;
+    }
     function validRecord(data, id) {
       let effectiveStatus = data.status == 'deleted' ? data.get('previousStatus', '') : data.status;
       return data.keys().hasAll([
@@ -70,8 +76,10 @@ service cloud.firestore {
         'status', 'archived', 'createdAt', 'createdByUid', 'createdByName', 'updatedAt', 'updatedByUid', 'updatedByName',
         'completedAt', 'completedByUid', 'completedByName', 'archivedAt', 'archivedByUid', 'archivedByName',
         'editedAt', 'editedByUid', 'editedByName', 'editRevision', 'editSourceId',
-        'previousStatus', 'deletedAt', 'deletedByUid', 'deletedByName', 'deleteKind', 'replacementId'
+        'previousStatus', 'deletedAt', 'deletedByUid', 'deletedByName', 'deleteKind', 'replacementId',
+        'trail', 'trailCount'
       ])
+        && data.get('trail', {}) is map && data.get('trailCount', 0) is int
         && data.operation in ['reverse', 'cancel'] && data.entity in ['AIO', 'ODI']
         && data.fiscalYear is string && data.fiscalYear.matches('^20[0-9]{2}$')
         && data.documentNumber is string && data.documentNumber.matches('^[0-9]{10}$') && id == identity(data)
@@ -88,108 +96,97 @@ service cloud.firestore {
           || (data.archived == true && effectiveStatus == 'done' && data.archivedAt is timestamp && data.archivedAt <= request.time
             && data.archivedByUid is string && data.archivedByUid.size() > 0 && nonemptyName(data.archivedByName)));
     }
-    function updateActor(workspace) {
-      return request.resource.data.updatedAt == request.time && request.resource.data.updatedByUid == request.auth.uid
-        && request.resource.data.updatedByName == ownName(workspace);
+    function stampedBy(member, data) {
+      return data.updatedAt == request.time && data.updatedByUid == request.auth.uid && data.updatedByName == member.displayName;
     }
-    function editedNow(workspace, before, after) {
+    function editedNow(member, before, after) {
       return after.get('editRevision', 0) == before.get('editRevision', 0) + 1
-        && after.editedAt == request.time && after.editedByUid == request.auth.uid && after.editedByName == ownName(workspace);
+        && after.editedAt == request.time && after.editedByUid == request.auth.uid && after.editedByName == member.displayName;
     }
-    function normalCreate(workspace, data) {
+    function normalCreate(member, data) {
       return data.status == 'pending' && data.archived == false && data.createdAt == request.time
-        && data.createdByUid == request.auth.uid && data.createdByName == ownName(workspace)
-        && data.requester == ownName(workspace) && data.get('editRevision', 0) == 0 && data.get('editSourceId', '') == '';
+        && data.createdByUid == request.auth.uid && data.createdByName == member.displayName
+        && data.requester == member.displayName && data.get('editRevision', 0) == 0 && data.get('editSourceId', '') == ''
+        && trailAppended(member, {}, data, 'create');
     }
-    function correctedCreate(workspace, id, data) {
+    function correctedCreate(workspace, member, id, data) {
       let sourceId = data.get('editSourceId', '');
       let before = get(requestPath(workspace, sourceId)).data;
       let after = getAfter(requestPath(workspace, sourceId)).data;
-      return sourceId != '' && sourceId != id && canEdit(workspace, before)
+      return sourceId != '' && sourceId != id && canEdit(member, before)
         && data.createdAt == before.createdAt && data.createdByUid == before.createdByUid
         && data.createdByName == before.createdByName && data.requester == before.requester
-        && data.status == 'pending' && data.archived == false && editedNow(workspace, before, data)
+        && data.status == 'pending' && data.archived == false && editedNow(member, before, data)
+        && trailAppended(member, before, data, 'edit')
         && after.status == 'deleted' && after.get('deleteKind', '') == 'edit' && after.get('replacementId', '') == id
         && after.get('deletedAt', null) == request.time && after.get('deletedByUid', '') == request.auth.uid;
     }
-    function unchangedCompletion() {
-      return request.resource.data.completedAt == resource.data.completedAt
-        && request.resource.data.completedByUid == resource.data.completedByUid
-        && request.resource.data.completedByName == resource.data.completedByName;
+    function createAllowed(workspace, id, member, data) {
+      return activeMember(member) && stampedBy(member, data)
+        && (normalCreate(member, data) || correctedCreate(workspace, member, id, data))
+        && validRecord(data, id);
     }
-    function processUpdate(workspace) {
-      return isPoster(workspace) && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+    // Jenis transisi ditentukan sekali dari data sebelum/sesudah; entri trail harus sama.
+    function transitionOf(before, after) {
+      return before.status != 'deleted' && after.status == 'deleted' ? 'delete'
+        : before.status == 'deleted' ? 'undelete'
+        : before.status == after.status && before.archived == after.archived ? 'edit'
+        : before.archived != after.archived ? (after.archived == true ? 'archive' : 'restore')
+        : after.status == 'done' ? 'done' : 'reopen';
+    }
+    function processUpdate(member, before, after) {
+      return member.role == 'poster' && after.diff(before).affectedKeys().hasOnly([
         'status', 'archived', 'completedAt', 'completedByUid', 'completedByName',
-        'archivedAt', 'archivedByUid', 'archivedByName', 'updatedAt', 'updatedByUid', 'updatedByName'
+        'archivedAt', 'archivedByUid', 'archivedByName', 'updatedAt', 'updatedByUid', 'updatedByName', 'trail', 'trailCount'
       ]) && (
-        (resource.data.status == 'pending' && resource.data.archived == false && request.resource.data.status == 'done'
-          && request.resource.data.archived == false && request.resource.data.completedAt == request.time
-          && request.resource.data.completedByUid == request.auth.uid && request.resource.data.completedByName == ownName(workspace))
-        || (resource.data.status == 'done' && resource.data.archived == false && request.resource.data.status == 'pending' && request.resource.data.archived == false)
-        || (resource.data.status == 'done' && resource.data.archived == false && request.resource.data.status == 'done' && request.resource.data.archived == true
-          && unchangedCompletion() && request.resource.data.archivedAt == request.time && request.resource.data.archivedByUid == request.auth.uid
-          && request.resource.data.archivedByName == ownName(workspace))
-        || (resource.data.status == 'done' && resource.data.archived == true && request.resource.data.status == 'done' && request.resource.data.archived == false && unchangedCompletion())
+        (before.status == 'pending' && before.archived == false && after.status == 'done' && after.archived == false
+          && after.completedAt == request.time && after.completedByUid == request.auth.uid && after.completedByName == member.displayName)
+        || (before.status == 'done' && before.archived == false && after.status == 'pending' && after.archived == false)
+        || (before.status == 'done' && before.archived == false && after.status == 'done' && after.archived == true
+          && after.completedAt == before.completedAt && after.completedByUid == before.completedByUid && after.completedByName == before.completedByName
+          && after.archivedAt == request.time && after.archivedByUid == request.auth.uid && after.archivedByName == member.displayName)
+        || (before.status == 'done' && before.archived == true && after.status == 'done' && after.archived == false
+          && after.completedAt == before.completedAt && after.completedByUid == before.completedByUid && after.completedByName == before.completedByName)
       );
     }
-    function editUpdate(workspace) {
-      return canEdit(workspace, resource.data) && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-        'requestDate', 'note', 'updatedAt', 'updatedByUid', 'updatedByName', 'editedAt', 'editedByUid', 'editedByName', 'editRevision'
-      ]) && editedNow(workspace, resource.data, request.resource.data);
+    function editUpdate(member, before, after) {
+      return canEdit(member, before) && after.diff(before).affectedKeys().hasOnly([
+        'requestDate', 'note', 'updatedAt', 'updatedByUid', 'updatedByName', 'editedAt', 'editedByUid', 'editedByName', 'editRevision',
+        'trail', 'trailCount'
+      ]) && editedNow(member, before, after);
     }
-    function correctionLink(workspace, id, data) {
-      let targetId = data.get('replacementId', '');
-      return canEdit(workspace, resource.data) && targetId != '' && targetId != id && !exists(requestPath(workspace, targetId))
+    function correctionLink(workspace, member, id, before, after) {
+      let targetId = after.get('replacementId', '');
+      return canEdit(member, before) && targetId != '' && targetId != id && !exists(requestPath(workspace, targetId))
         && getAfter(requestPath(workspace, targetId)).data.get('editSourceId', '') == id
-        && getAfter(requestPath(workspace, targetId)).data.createdByUid == resource.data.createdByUid;
+        && getAfter(requestPath(workspace, targetId)).data.createdByUid == before.createdByUid;
     }
-    function removeUpdate(workspace, id) {
-      let after = request.resource.data;
-      return resource.data.status != 'deleted' && canRemove(workspace, resource.data)
-        && after.diff(resource.data).affectedKeys().hasOnly([
-          'status', 'previousStatus', 'deletedAt', 'deletedByUid', 'deletedByName', 'deleteKind', 'replacementId', 'updatedAt', 'updatedByUid', 'updatedByName'
-        ]) && after.status == 'deleted' && after.previousStatus == resource.data.status
-        && after.deletedAt == request.time && after.deletedByUid == request.auth.uid && after.deletedByName == ownName(workspace)
-        && (after.deleteKind == 'user' || (after.deleteKind == 'edit' && correctionLink(workspace, id, after)));
-    }
-
-    // Jalur soft-delete user sengaja berdiri SENDIRI dari validator update umum.
-    // Tujuannya: satu validasi edit/proses yang gagal tidak boleh ikut menggagalkan
-    // tombol Hapus. Otorisasi tetap server-side dan hanya berdasarkan member + UID.
-    function softDeleteUpdate(workspace) {
-      let after = request.resource.data;
-      let before = resource.data;
-      let member = get(memberPath(workspace)).data;
-      return request.auth != null
-        && exists(memberPath(workspace))
-        && member.active == true
-        && member.role in ['requester', 'poster']
-        && before.status != 'deleted'
-        && (
-          member.role == 'poster'
-          || (
-            member.role == 'requester'
-            && before.createdByUid == request.auth.uid
-            && before.status == 'pending'
-            && before.archived == false
-          )
-        )
+    function removeUpdate(workspace, member, id, before, after) {
+      return canRemove(member, before)
         && after.diff(before).affectedKeys().hasOnly([
-          'status', 'previousStatus', 'deletedAt', 'deletedByUid', 'deletedByName', 'deleteKind', 'replacementId',
-          'updatedAt', 'updatedByUid', 'updatedByName'
-        ])
-        && after.status == 'deleted'
-        && after.get('previousStatus', '') == before.status
-        && after.get('deleteKind', '') == 'user'
-        && after.get('replacementId', '') == ''
-        && after.get('deletedByUid', '') == request.auth.uid
-        && after.get('updatedByUid', '') == request.auth.uid;
+          'status', 'previousStatus', 'deletedAt', 'deletedByUid', 'deletedByName', 'deleteKind', 'replacementId', 'updatedAt', 'updatedByUid', 'updatedByName',
+          'trail', 'trailCount'
+        ]) && after.previousStatus == before.status
+        && after.deletedAt == request.time && after.deletedByUid == request.auth.uid && after.deletedByName == member.displayName
+        && ((after.deleteKind == 'user' && after.get('replacementId', '') == '')
+          || (after.deleteKind == 'edit' && correctionLink(workspace, member, id, before, after)));
     }
-    function recoverUpdate(workspace) {
-      return resource.data.status == 'deleted' && canRecover(workspace, resource.data)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'status', 'previousStatus', 'deletedAt', 'deletedByUid', 'deletedByName', 'deleteKind', 'replacementId', 'updatedAt', 'updatedByUid', 'updatedByName'
-        ]) && request.resource.data.status == resource.data.previousStatus;
+    function recoverUpdate(member, before, after) {
+      return canRecover(member, before)
+        && after.diff(before).affectedKeys().hasOnly([
+          'status', 'previousStatus', 'deletedAt', 'deletedByUid', 'deletedByName', 'deleteKind', 'replacementId', 'updatedAt', 'updatedByUid', 'updatedByName',
+          'trail', 'trailCount'
+        ]) && after.status == before.previousStatus;
+    }
+    function updateAllowed(workspace, id, member, before, after) {
+      let action = transitionOf(before, after);
+      return activeMember(member) && stampedBy(member, after)
+        && trailAppended(member, before, after, action)
+        && (action == 'delete' ? removeUpdate(workspace, member, id, before, after)
+          : action == 'undelete' ? recoverUpdate(member, before, after)
+          : action == 'edit' ? editUpdate(member, before, after)
+          : processUpdate(member, before, after))
+        && validRecord(after, id);
     }
     match /workspaces/{workspace}/members/{uid} {
       allow get: if request.auth != null && request.auth.uid == uid;
@@ -197,13 +194,8 @@ service cloud.firestore {
     }
     match /workspaces/{workspace}/requests/{id} {
       allow read: if isMember(workspace);
-      allow create: if isMember(workspace) && validRecord(request.resource.data, id) && updateActor(workspace)
-        && (normalCreate(workspace, request.resource.data) || correctedCreate(workspace, id, request.resource.data));
-      // Soft-delete dibuat sebagai allow tersendiri agar benar-benar terisolasi
-      // dari validRecord/updateActor dan jalur edit/proses lain.
-      allow update: if softDeleteUpdate(workspace);
-      allow update: if isMember(workspace) && validRecord(request.resource.data, id) && updateActor(workspace)
-        && (processUpdate(workspace) || editUpdate(workspace) || removeUpdate(workspace, id) || recoverUpdate(workspace));
+      allow create: if request.auth != null && createAllowed(workspace, id, memberOf(workspace), request.resource.data);
+      allow update: if request.auth != null && updateAllowed(workspace, id, memberOf(workspace), resource.data, request.resource.data);
       allow delete: if false;
     }
     match /{document=**} { allow read, write: if false; }

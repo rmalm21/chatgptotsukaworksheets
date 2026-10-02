@@ -1,3 +1,20 @@
+# Verifikasi versi 3.1.0 — RequestReverseAcc
+
+Pemeriksaan lokal pada 2 Oktober 2026:
+
+- **54 tes otomatis** (`node --test tests/*.test.mjs`) lulus: 46 tes lama + tes baru untuk parser cari nomor, filter lokal, trail per transisi, ringkasan edit, jejak data lama, field-path update trail, lacak nomor di demo store, dan alur cari/lacak di controller.
+- **10 tes rules di Firestore Emulator** (`npm run test:rules`, emulator v1.22.0, SDK firebase 12.19.0 yang sama dengan CDN) lulus, memakai `firestore-repository.js` asli: create dengan trail; create tanpa/dengan trail palsu ditolak; selesai → buka kembali → selesai → arsip → pulihkan; update tanpa trail, aksi salah, lompat nomor, atau mengubah entri lama ditolak; requester tidak bisa memproses atau menghapus milik orang lain; hapus/pulihkan milik sendiri; edit biasa dan koreksi identitas (transaksi) dengan riwayat pindah; pesan duplikat; lacak nomor oleh anggota dan ditolak untuk non-anggota; dokumen lama tanpa trail tetap bisa diproses; count agregasi; batch create 100 dokumen dan bulk 250 dokumen.
+- Rules 3.0.8 juga dicek di emulator (selesai dan hapus requester berhasil) sebagai pembanding.
+- Browser (Chromium headless, mode demo): filter lokal via `/`, lacak 4 nomor (1 tidak ditemukan), riwayat dokumen arsip, Buka di daftar, centang + bulk selesai, tanpa error JavaScript. Mobile 390px tanpa scroll horizontal; tabel desktop muat tanpa scroll mulai lebar layar 1280px.
+
+Batas verifikasi:
+
+- Index komposit tidak ditegakkan oleh emulator. Versi ini tidak menambah index; lacak nomor memakai index single-field bawaan `documentNumber`.
+- Belum diuji di project Firebase produksi, tab Teams, akun tim nyata, atau clipboard kantor.
+- Font Google tidak termuat di lingkungan uji (jaringan dibatasi); tampilan memakai font fallback.
+
+---
+
 # Verifikasi versi 3.0 — RequestReverseAcc
 
 Pemeriksaan lokal lulus pada 1 Oktober 2026:

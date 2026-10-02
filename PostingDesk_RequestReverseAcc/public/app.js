@@ -1,5 +1,5 @@
 import { APP_CONFIG } from './firebase-config.js';
-import { ACTIONS, MAX_BULK, PAGE_SIZE, TYPES, copyText, datePreset, formatDate, formatTimestamp, friendlyError, initials, monthRange, shiftMonth, parseRequestPaste, sortRows, todayJakarta, validDate, validateBatch, visibleRows, yearSummary, canEdit, canDelete, canRestoreTrash, timestampMillis } from './domain.js';
+import { ACTIONS, MAX_BULK, PAGE_SIZE, TRAIL_LABELS, TYPES, copyText, datePreset, formatDate, formatTimestamp, friendlyError, initials, matchesSearch, monthRange, shiftMonth, parseRequestPaste, parseSearch, rowView, sortRows, statusLabel, todayJakarta, traceOf, validDate, validateBatch, visibleRows, yearSummary, canEdit, canDelete, canRestoreTrash, timestampMillis } from './domain.js';
 import { hydrateIcons, icon } from './icons.js';
 import { mountControls, shouldSubmitPaste } from './controls.js';
 const controls = mountControls();
@@ -19,7 +19,7 @@ const state = {
   audience: prefs.audience === 'mine' ? 'mine' : 'team', counts: emptyCounts(), countsLoading: true, countsError: false,
   view: 'pending', density: prefs.density === 'compact' ? 'compact' : 'comfortable', monthIndex: currentMonth, preset: 'indexed', from: initialMonthRange.from, to: initialMonthRange.to, rows: [], selected: new Set(), page: 1,
   actor: null, repository: null, busy: false, loading: false, error: '', isDemo: false, dateInvalid: false,
-  metadata: { cached: true, pendingWrites: false, mayHaveMore: false }, archiveLimit: 100
+  metadata: { cached: true, pendingWrites: false, mayHaveMore: false }, archiveLimit: 100, searchTerms: []
 };
 let authClient = null;
 let demoClient = null;
@@ -36,6 +36,8 @@ let confirmation = null;
 let detailRecord = null;
 let formattedDuplicates = 0;
 let pasteDefaults = {};
+let searchGeneration = 0;
+let searchRows = [];
 
 const monthLabel = monthKey => {
   const value = new Intl.DateTimeFormat('id-ID', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${monthKey}-01T00:00:00Z`));
@@ -44,16 +46,18 @@ const monthLabel = monthKey => {
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const periodFilteredView = () => ['done', 'archive'].includes(state.view);
 const getScope = () => ({ operation: state.operation, entity: state.entity, view: state.view, archived: state.view === 'archive', trash: state.view === 'trash', ownerUid: state.audience === 'mine' ? state.actor?.uid : '', from: periodFilteredView() ? state.from : '', to: periodFilteredView() ? state.to : '', archiveLimit: state.archiveLimit });
-const getVisible = () => visibleRows(state.rows, state.view);
+// Filter nomor bekerja di data yang sudah dimuat: tidak ada read Firestore tambahan.
+const getVisible = () => visibleRows(state.rows, state.view).filter(row => matchesSearch(row, state.searchTerms));
 const ready = () => !state.loading && !state.error && !state.busy && !state.dateInvalid && (state.isDemo || (navigator.onLine && !state.metadata.cached));
 const isPoster = () => state.actor?.role === 'poster';
 
 function toast(message, error = false) {
   clearTimeout(toastTimer);
   $('toast').textContent = message;
-  $('toast').classList.toggle('is-error', error);
+  $('toast').classList.toggle('is-error', error === true);
+  $('toast').classList.toggle('is-warning', error === 'warning');
   $('toast').hidden = false;
-  toastTimer = setTimeout(() => { $('toast').hidden = true; }, error ? 8000 : 5000);
+  toastTimer = setTimeout(() => { $('toast').hidden = true; }, error ? 9000 : 5000);
 }
 
 function savePrefs() {
@@ -87,7 +91,7 @@ function rowMarkup(row) {
     <td class="row-select"><label><input type="checkbox" data-select="${escape(row.id)}" aria-label="Pilih dokumen ${escape(row.documentNumber)}" ${selected ? 'checked' : ''} ${state.loading || state.busy ? 'disabled' : ''}></label></td>
     <td class="row-doc"><button type="button" class="document-button" data-doc-drag="${escape(row.id)}" aria-label="Detail dokumen ${escape(row.documentNumber)}">${escape(row.documentNumber)}</button>${row.note ? `<span class="doc-note" title="Ada catatan">${icon('info')}</span>` : ''}</td>
     <td class="row-entity"><span class="entity-tag">${escape(row.entity)}</span></td>
-    <td class="row-year"><span class="year-tag ${row.fiscalYear !== currentYear ? 'is-other-year' : ''}">${escape(row.fiscalYear)}${row.fiscalYear !== currentYear ? ' · tahun lain' : ''}</span></td>
+    <td class="row-year">${row.fiscalYear !== currentYear ? `<span class="year-tag is-other-year" title="Bukan tahun berjalan (${currentYear})">${escape(row.fiscalYear)}<span class="sr-only"> · tahun lain</span></span>` : `<span class="year-tag">${escape(row.fiscalYear)}</span>`}</td>
     <td class="row-requester"><span class="requester-label"><span class="avatar" aria-hidden="true">${escape(initials(row.requester))}</span><span>${escape(row.requester)}</span></span></td>
     <td class="row-date"><span class="date-label">${escape(formatDate(row.requestDate, true))}</span>${row.editedAt ? `<span class="edit-meta" title="${escape(row.editedByName)} · ${escape(formatTimestamp(row.editedAt))}">Diedit ${escape(formatTimestamp(row.editedAt))}</span>` : ''}</td>
     <td class="row-status">${status}</td><td class="row-actions"><button type="button" class="button-icon" data-detail="${escape(row.id)}" aria-label="Tindakan dokumen ${escape(row.documentNumber)}">${icon('more')}</button></td>
@@ -100,10 +104,7 @@ function render() {
   const allowed = new Set(rows.map(row => row.id));
   state.selected.forEach(id => { if (!allowed.has(id)) state.selected.delete(id); });
   const count = rows.length;
-  const selected = state.selected.size;
   $('request-board').classList.toggle('is-compact', state.density === 'compact');
-  $('request-board').classList.toggle('has-selection', selected > 0);
-  $('selection-bar').classList.toggle('has-selection', selected > 0);
   document.querySelectorAll('[data-density]').forEach(button => {
     const active = button.dataset.density === state.density;
     button.setAttribute('aria-pressed', String(active)); button.classList.toggle('is-active', active);
@@ -140,16 +141,44 @@ function render() {
     button.setAttribute('aria-pressed', String(active)); button.classList.toggle('is-active', active);
   });
   $('list-title').textContent = { pending: 'Dokumen siap diproses', done: 'Dokumen sudah diproses', archive: 'Riwayat yang diarsipkan', trash: 'Request di Sampah' }[state.view];
-  const periodSummary = periodActive ? (state.preset === 'indexed' ? ` · ${monthLabel(state.monthIndex)}` : state.preset === 'all' ? ' · semua tanggal request' : ' · periode terpilih') : '';
-  $('list-summary').textContent = state.loading ? 'Memuat dokumen…' : `${count} dokumen${selected ? ` · ${selected} dipilih` : ''}${periodSummary}`;
   const years = yearSummary(rows, currentYear);
   $('year-awareness').hidden = !years.nonCurrent || state.loading;
   $('year-awareness-text').textContent = `${years.nonCurrent} dokumen dari tahun ${years.otherYears.join(', ')} · tahun berjalan ${currentYear}.`;
   $('request-rows').innerHTML = rows.slice(start, start + PAGE_SIZE).map(rowMarkup).join('');
+  const searching = state.searchTerms.length > 0;
   $('empty-state').hidden = count > 0;
-  $('empty-title').textContent = state.error ? 'Daftar belum tersedia' : state.loading ? 'Memuat dokumen' : { pending: 'Antrean bersih', done: 'Belum ada dokumen selesai', archive: 'Arsip masih kosong', trash: 'Sampah masih kosong' }[state.view];
-  $('empty-description').textContent = state.error ? state.error : state.loading ? 'Mengambil daftar dari workspace tim.' : periodActive && state.preset !== 'all' ? 'Tidak ada dokumen pada periode ini.' : { pending: 'Semua pengajuan yang belum selesai akan tampil di Antrean tanpa dibatasi periode.', done: 'Dokumen yang ditandai selesai akan muncul di sini.', archive: 'Arsipkan dokumen dari daftar Selesai untuk merapikan riwayat.', trash: 'Request yang dihapus dapat dipulihkan dari sini.' }[state.view];
-  $('empty-add').hidden = state.view !== 'pending' || state.loading || Boolean(state.error);
+  $('empty-title').textContent = state.error ? 'Daftar belum tersedia' : state.loading ? 'Memuat dokumen' : searching ? 'Nomor tidak ada di daftar ini' : { pending: 'Antrean bersih', done: 'Belum ada dokumen selesai', archive: 'Arsip masih kosong', trash: 'Sampah masih kosong' }[state.view];
+  $('empty-description').textContent = state.error ? state.error : state.loading ? 'Mengambil daftar dari workspace tim.' : searching ? 'Tekan Enter di kotak cari untuk melacak nomor di semua jenis, entitas, tahun, dan status, termasuk Arsip dan Sampah.' : periodActive && state.preset !== 'all' ? 'Tidak ada dokumen pada periode ini.' : { pending: 'Semua pengajuan yang belum selesai akan tampil di Antrean tanpa dibatasi periode.', done: 'Dokumen yang ditandai selesai akan muncul di sini.', archive: 'Arsipkan dokumen dari daftar Selesai untuk merapikan riwayat.', trash: 'Request yang dihapus dapat dipulihkan dari sini.' }[state.view];
+  $('empty-add').hidden = state.view !== 'pending' || state.loading || Boolean(state.error) || searching;
+  $('table-range').textContent = count ? `${start + 1}–${Math.min(start + PAGE_SIZE, count)} dari ${count} dokumen` : '0 dokumen';
+  $('page-label').textContent = `${state.page} / ${pages}`;
+  $('pagination').hidden = pages <= 1;
+  $('page-prev').disabled = state.page <= 1;
+  $('page-next').disabled = state.page >= pages;
+  $('load-archive').hidden = !['archive','trash'].includes(state.view) || !state.metadata.mayHaveMore;
+  $('load-archive').textContent = state.view === 'trash' ? 'Muat Sampah lebih lama' : 'Muat arsip lebih lama';
+  $('load-archive').disabled = state.loading;
+  $('data-error').textContent = state.error;
+  $('data-error').hidden = !state.error;
+  $('context-hint').textContent = state.view === 'trash' ? 'Sampah menampilkan semua request yang dihapus dan dapat dipulihkan sesuai hak akses.' : state.view === 'archive' ? `Arsip difilter berdasarkan periode request. ${state.preset === 'indexed' ? `Periode aktif: ${monthLabel(state.monthIndex)}.` : ''}` : state.view === 'done' ? `Selesai difilter berdasarkan periode request. ${state.preset === 'indexed' ? `Periode aktif: ${monthLabel(state.monthIndex)}.` : ''}` : 'Antrean selalu menampilkan semua pengajuan yang belum selesai. Filter periode hanya berlaku di Selesai dan Arsip.';
+  syncLabel();
+  for (const id of ['date-preset', 'date-from', 'date-to', 'month-prev', 'month-next', 'month-current']) $(id).disabled = state.busy || !periodActive;
+  $('search-number').disabled = state.busy; $('search-all').disabled = state.busy;
+  renderSelection(rows);
+  controls.sync();
+}
+
+// Bagian yang berubah saat checkbox dipilih. Dipisah agar centang satu baris tidak
+// membangun ulang seluruh tabel.
+function renderSelection(rows = getVisible()) {
+  const count = rows.length;
+  const selected = state.selected.size;
+  const periodActive = periodFilteredView();
+  $('request-board').classList.toggle('has-selection', selected > 0);
+  $('selection-bar').classList.toggle('has-selection', selected > 0);
+  const periodSummary = periodActive ? (state.preset === 'indexed' ? ` · ${monthLabel(state.monthIndex)}` : state.preset === 'all' ? ' · semua tanggal request' : ' · periode terpilih') : '';
+  const searchSummary = state.searchTerms.length ? ` · cocok “${state.searchTerms.slice(0, 3).join(', ')}${state.searchTerms.length > 3 ? '…' : ''}” dari ${visibleRows(state.rows, state.view).length}` : '';
+  $('list-summary').textContent = state.loading ? 'Memuat dokumen…' : `${count} dokumen${searchSummary}${selected ? ` · ${selected} dipilih` : ''}${periodSummary}`;
   $('select-all').checked = count > 0 && selected === count;
   $('select-all').indeterminate = selected > 0 && selected < count;
   $('select-all').disabled = !count || state.loading || state.busy;
@@ -173,21 +202,6 @@ function render() {
   $('copy-filter').disabled = !count || !ready();
   $('copy-filter-label').textContent = selected ? `Copy ${selected} nomor` : `Copy hasil filter (${count})`;
   $('new-request').disabled = state.busy; $('logout-button').disabled = state.busy;
-  $('table-range').textContent = count ? `${start + 1}–${Math.min(start + PAGE_SIZE, count)} dari ${count} dokumen` : '0 dokumen';
-  $('page-label').textContent = `${state.page} / ${pages}`;
-  $('pagination').hidden = pages <= 1;
-  $('page-prev').disabled = state.page <= 1;
-  $('page-next').disabled = state.page >= pages;
-  $('load-archive').hidden = !['archive','trash'].includes(state.view) || !state.metadata.mayHaveMore;
-  $('load-archive').textContent = state.view === 'trash' ? 'Muat Sampah lebih lama' : 'Muat arsip lebih lama';
-  $('load-archive').disabled = state.loading;
-  $('data-error').textContent = state.error;
-  $('data-error').hidden = !state.error;
-  $('context-hint').textContent = state.view === 'trash' ? 'Sampah menampilkan semua request yang dihapus dan dapat dipulihkan sesuai hak akses.' : state.view === 'archive' ? `Arsip difilter berdasarkan periode request. ${state.preset === 'indexed' ? `Periode aktif: ${monthLabel(state.monthIndex)}.` : ''}` : state.view === 'done' ? `Selesai difilter berdasarkan periode request. ${state.preset === 'indexed' ? `Periode aktif: ${monthLabel(state.monthIndex)}.` : ''}` : 'Antrean selalu menampilkan semua pengajuan yang belum selesai. Filter periode hanya berlaku di Selesai dan Arsip.';
-  syncLabel();
-  updatePastePreview();
-  for (const id of ['date-preset', 'date-from', 'date-to', 'month-prev', 'month-next', 'month-current']) $(id).disabled = state.busy || !periodActive;
-  controls.sync();
 }
 
 function renderCounts() {
@@ -240,6 +254,7 @@ function switchScope(changes) {
   else if (changes.operation !== undefined) pasteDefaults.operation = state.operation;
   if (!parsed.detected.entity) $('form-entity').value = state.entity;
   else if (changes.entity !== undefined) pasteDefaults.entity = state.entity;
+  updatePastePreview();
   savePrefs(); refreshRows(); if (audienceChanged || Date.now() - lastCountRefreshAt > 60000) refreshCounts();
 }
 
@@ -287,7 +302,7 @@ function setWriteBusy(value) {
   $('confirm-action').disabled = value;
   $('edit-fields').disabled = value; $('save-edit').disabled = value;
   controls.close();
-  render();
+  render(); updatePastePreview();
 }
 
 function closeDialog(id) {
@@ -387,7 +402,9 @@ async function saveRequest(event) {
     resetComposer(); savePrefs();
     if (queryChanged) refreshRows(); else render();
     refreshCounts();
-    toast(`${result.added} dokumen ditambahkan ke ${TYPES[draft.operation]} · ${[...new Set(draft.records.map(row => row.entity))].join(' + ')}.`);
+    const related = (result.related || []).filter(row => !draft.records.some(record => record.documentNumber === row.documentNumber && record.operation === row.operation && record.entity === row.entity && record.fiscalYear === row.fiscalYear));
+    const relatedNote = related.length ? ` · Perhatian: ${new Set(related.map(row => row.documentNumber)).size} nomor juga tercatat di jenis/entitas/tahun lain (${related.slice(0, 2).map(row => `${row.documentNumber} ${TYPES[row.operation]} ${row.entity} ${row.fiscalYear}`).join('; ')}${related.length > 2 ? '; …' : ''}). Lacak lewat kotak cari.` : '';
+    toast(`${result.added} dokumen ditambahkan ke ${TYPES[draft.operation]} · ${[...new Set(draft.records.map(row => row.entity))].join(' + ')}.${relatedNote}`, relatedNote ? 'warning' : false);
   } catch (error) {
     $('form-error').textContent = friendlyError(error); $('form-error').hidden = false;
   } finally { setWriteBusy(false); updatePastePreview(); }
@@ -460,36 +477,101 @@ function openCopy() {
     const years = yearSummary(rows, currentYear);
     $('copy-year-hint').hidden = !years.nonCurrent;
     $('copy-year-hint').textContent = `Termasuk ${years.nonCurrent} dokumen tahun ${years.otherYears.join(', ')}. Perhatikan tahun dokumen saat memproses.`;
-    $('copy-scope').textContent = `${TYPES[state.operation]} · ${state.entity} · tahun ${years.years.join(' / ')}${state.from ? ` · ${formatDate(state.from, true)} – ${formatDate(state.to, true)}` : ' · semua tanggal request'}`;
+    const scope = getScope();
+    $('copy-scope').textContent = `${TYPES[state.operation]} · ${state.entity} · tahun ${years.years.join(' / ')}${scope.from ? ` · ${formatDate(scope.from, true)} – ${formatDate(scope.to, true)}` : ' · semua tanggal request'}${state.searchTerms.length ? ' · sesuai filter nomor' : ''}`;
     $('copy-text').value = text; $('copy-result').textContent = '';
     $('copy-dialog').showModal();
     copyClipboard();
   } catch (error) { toast(friendlyError(error), true); }
 }
 
-function openDetail(id) {
-  const row = state.rows.find(item => item.id === id);
+function trailMarkup(row) {
+  return traceOf(row).map(entry => `<li class="${entry.legacy ? 'is-legacy' : ''}"><span class="trail-dot" aria-hidden="true"></span><div><strong>${escape(TRAIL_LABELS[entry.action] || entry.action)}</strong><span>${escape(entry.name || '—')} · ${escape(formatTimestamp(entry.at))}${entry.legacy ? ' · data lama' : ''}</span>${entry.info ? `<small>${escape(entry.info)}</small>` : ''}</div></li>`).join('');
+}
+
+// Detail bisa dibuka dari daftar (id) atau dari hasil lacak nomor (objek baris).
+function openDetail(target) {
+  const listed = getVisible().find(item => item.id === (typeof target === 'string' ? target : target?.id));
+  const row = listed || (typeof target === 'object' ? target : searchRows.find(item => item.id === target));
   if (!row) return;
   detailRecord = row;
   $('detail-number').textContent = row.documentNumber;
   $('detail-status').innerHTML = row.status === 'deleted' ? `<span class="status-badge is-deleted">${icon('trash')}Di Sampah</span>` : row.archived ? `<span class="status-badge is-archive">${icon('archive')}Diarsipkan</span>` : row.status === 'done' ? `<span class="status-badge">${icon('check')}Selesai</span>` : '<span class="status-badge is-pending">Belum diproses</span>';
+  // Siapa/kapan per kejadian ada di Riwayat aktivitas; fakta di sini hanya identitas dokumen.
   const facts = [
     ['Jenis request', TYPES[row.operation]], ['Entitas / tahun', `${row.entity} / ${row.fiscalYear}`],
     ['Requester', row.requester], ['Tanggal request', formatDate(row.requestDate)],
-    ['Dicatat oleh', row.createdByName], ['Waktu dicatat', formatTimestamp(row.createdAt)],
-    ['Diselesaikan oleh', row.completedByName || '—'], ['Waktu selesai', formatTimestamp(row.completedAt)],
-    ...(row.archived ? [['Diarsipkan oleh', row.archivedByName], ['Waktu arsip', formatTimestamp(row.archivedAt)]] : []),
-    ...(row.editedAt ? [['Terakhir diedit', `${row.editedByName} · ${formatTimestamp(row.editedAt)}`]] : [['Terakhir diedit', 'Belum pernah diedit']]),
-    ...(row.status === 'deleted' ? [['Dihapus oleh', `${row.deletedByName} · ${formatTimestamp(row.deletedAt)}`], ['Keterangan', row.deleteKind === 'edit' ? `Diganti saat edit · ${row.replacementId}` : 'Dihapus pengguna']] : []),
-    ['Update terakhir', `${row.updatedByName} · ${formatTimestamp(row.updatedAt)}`]
+    ['Status', `${statusLabel(row)}${row.status === 'done' || row.archived ? ` · selesai oleh ${row.completedByName || '—'}` : ''}`],
+    ...(row.status === 'deleted' ? [['Keterangan', row.deleteKind === 'edit' ? `Diganti saat edit · ${row.replacementId}` : `Dihapus ${row.deletedByName} · sebelumnya ${statusLabel({ ...row, status: row.previousStatus })}`]] : []),
+    ...(row.editSourceId ? [['Pengganti dari', row.editSourceId]] : []),
+    ['ID dokumen', row.id]
   ];
   $('detail-facts').innerHTML = facts.map(([label, value]) => `<dt>${escape(label)}</dt><dd>${escape(value)}</dd>`).join('');
   $('detail-note-section').hidden = !row.note; $('detail-note').textContent = row.note;
-  $('detail-edit').hidden = !canEdit(row, state.actor); $('detail-edit').disabled = !ready();
-  $('detail-delete').hidden = !canDelete(row, state.actor); $('detail-delete').disabled = !ready();
-  $('detail-action').hidden = row.status === 'deleted' ? !canRestoreTrash(row, state.actor) : !isPoster(); $('detail-action').disabled = !ready();
+  $('detail-trail').innerHTML = trailMarkup(row);
+  // Tindakan hanya untuk dokumen di daftar aktif agar scope konfirmasi dan data tetap sinkron.
+  $('detail-outside').hidden = Boolean(listed); $('detail-jump').hidden = Boolean(listed);
+  $('detail-edit').hidden = !listed || !canEdit(row, state.actor); $('detail-edit').disabled = !ready();
+  $('detail-delete').hidden = !listed || !canDelete(row, state.actor); $('detail-delete').disabled = !ready();
+  $('detail-action').hidden = !listed || (row.status === 'deleted' ? !canRestoreTrash(row, state.actor) : !isPoster()); $('detail-action').disabled = !ready();
   $('detail-action').textContent = row.status === 'deleted' ? 'Pulihkan dari Sampah' : row.archived ? 'Pulihkan arsip' : row.status === 'done' ? 'Arsipkan' : 'Selesaikan';
   $('detail-dialog').showModal();
+}
+
+function applySearchFilter() {
+  const terms = parseSearch($('search-number').value).terms;
+  if (terms.join(' ') === state.searchTerms.join(' ')) return;
+  state.searchTerms = terms; state.page = 1; render();
+}
+
+function searchResultMarkup(row) {
+  const trace = traceOf(row), last = trace[trace.length - 1];
+  const statusClass = { trash: 'is-deleted', archive: 'is-archive', pending: 'is-pending', done: '' }[rowView(row)];
+  return `<li class="search-result"><div class="search-result-main"><button type="button" class="document-button" data-search-detail="${escape(row.id)}">${escape(row.documentNumber)}</button><span class="status-badge ${statusClass}">${escape(statusLabel(row))}</span></div>
+    <div class="search-result-tags"><span>${escape(TYPES[row.operation] || row.operation)}</span><span class="entity-tag">${escape(row.entity)}</span><span class="year-tag ${row.fiscalYear !== currentYear ? 'is-other-year' : ''}">${escape(row.fiscalYear)}</span><span>${escape(row.requester)} · ${escape(formatDate(row.requestDate, true))}</span></div>
+    ${last ? `<p class="search-result-last">Terakhir: <strong>${escape(TRAIL_LABELS[last.action] || last.action)}</strong> · ${escape(last.name || '—')} · ${escape(formatTimestamp(last.at))}</p>` : ''}
+    <div class="search-result-actions"><button type="button" class="button button-link compact" data-search-detail="${escape(row.id)}"><span>${icon('history')}</span>Riwayat</button><button type="button" class="button button-secondary compact" data-search-jump="${escape(row.id)}">${icon('target')}Buka di daftar</button></div></li>`;
+}
+
+// Lacak nomor di seluruh workspace: jenis, entitas, tahun, status, termasuk Arsip & Sampah.
+async function openSearch() {
+  if (!state.repository || !state.actor) return;
+  const text = $('search-number').value;
+  const parsed = parseSearch(text);
+  $('search-error').hidden = true; $('search-missing').hidden = true;
+  if (parsed.error) { toast(parsed.error, true); $('search-number').focus(); return; }
+  const generation = ++searchGeneration;
+  searchRows = [];
+  $('search-title').textContent = parsed.exact.length ? `Lacak ${parsed.exact.length} nomor` : `Nomor berawalan ${parsed.prefix}`;
+  $('search-summary').textContent = 'Mencari di semua data…';
+  $('search-results').innerHTML = '';
+  if (!$('search-dialog').open) $('search-dialog').showModal();
+  try {
+    const result = await state.repository.findDocuments(text);
+    if (generation !== searchGeneration) return;
+    searchRows = result.rows;
+    const numbers = new Set(result.rows.map(row => row.documentNumber)).size;
+    $('search-summary').textContent = result.rows.length
+      ? `${result.rows.length} catatan untuk ${numbers} nomor${result.truncated ? ' · hanya 50 pertama, ketik lebih banyak digit' : ''}. Nomor yang sama bisa ada di jenis, entitas, atau tahun berbeda.`
+      : 'Tidak ada catatan untuk pencarian ini di jenis, entitas, tahun, maupun status mana pun.';
+    $('search-missing').hidden = !result.missing.length;
+    $('search-missing').textContent = `Belum pernah tercatat: ${result.missing.slice(0, 12).join(', ')}${result.missing.length > 12 ? ` +${result.missing.length - 12} lainnya` : ''}.`;
+    $('search-results').innerHTML = result.rows.map(searchResultMarkup).join('');
+  } catch (error) {
+    if (generation !== searchGeneration) return;
+    $('search-summary').textContent = '';
+    $('search-error').textContent = friendlyError(error); $('search-error').hidden = false;
+  }
+}
+
+function jumpTo(row) {
+  if (!row || state.busy) return;
+  const month = validDate(row.requestDate) ? row.requestDate.slice(0, 7) : currentMonth, range = monthRange(month);
+  state.monthIndex = month; state.preset = 'indexed';
+  $('date-preset').value = 'indexed'; $('custom-range').hidden = true; $('reset-date').hidden = true;
+  $('search-number').value = row.documentNumber; state.searchTerms = [row.documentNumber];
+  for (const id of ['search-dialog', 'detail-dialog']) if ($(id).open) $(id).close();
+  switchScope({ operation: row.operation, entity: row.entity, view: rowView(row), audience: 'team', from: range.from, to: range.to });
 }
 
 function openEdit(row) {
@@ -540,7 +622,8 @@ function activateSession(session, demo = false) {
 function clearSession() {
   rowGeneration++; countGeneration++;
   if (stopRows) stopRows(); stopRows = null;
-  state.actor = null; state.repository = null; state.rows = []; state.selected.clear();
+  state.actor = null; state.repository = null; state.rows = []; state.selected.clear(); state.searchTerms = []; searchRows = [];
+  $('search-number').value = '';
   $('app').hidden = true; $('gate').hidden = false; $('access-denied').hidden = true;
   $('login-form').hidden = !configured();
   $('form-documents').value = ''; $('form-note').value = '';
@@ -672,6 +755,10 @@ document.addEventListener('pointermove', event => {
 document.addEventListener('pointerup', () => { if (docDrag) finishDocDrag(); });
 document.addEventListener('pointercancel', () => { docDrag = null; clearDocDragHighlight(); });
 document.addEventListener('keydown', event => {
+  // `/` membuka kotak cari nomor dari mana saja selama tidak sedang mengetik.
+  if (event.key === '/' && state.actor && !event.ctrlKey && !event.metaKey && !event.altKey && !event.target.closest?.('input, textarea, [contenteditable], dialog')) {
+    event.preventDefault(); $('search-number').focus(); $('search-number').select?.(); return;
+  }
   const target = event.target.closest?.('[data-doc-drag]');
   if (target && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openDetail(target.dataset.docDrag); }
 });
@@ -691,6 +778,8 @@ document.addEventListener('click', event => {
   }
   const doc = event.target.closest('[data-doc-drag]'); if (doc && !suppressDocClick) openDetail(doc.dataset.docDrag);
   const detail = event.target.closest('[data-detail]'); if (detail && !suppressDocClick) openDetail(detail.dataset.detail);
+  const searchDetail = event.target.closest('[data-search-detail]'); if (searchDetail) openDetail(searchRows.find(row => row.id === searchDetail.dataset.searchDetail));
+  const searchJump = event.target.closest('[data-search-jump]'); if (searchJump) jumpTo(searchRows.find(row => row.id === searchJump.dataset.searchJump));
   const complete = event.target.closest('[data-complete]'); if (complete) openConfirmation('done', [complete.dataset.complete]);
   const archive = event.target.closest('[data-archive]'); if (archive) openConfirmation('archive', [archive.dataset.archive]);
 });
@@ -700,8 +789,8 @@ document.addEventListener('change', event => {
   if (!input) return;
   if (input.checked && state.selected.size >= MAX_BULK) { input.checked = false; toast(`Maksimal ${MAX_BULK} pilihan untuk satu tindakan.`, true); return; }
   input.checked ? state.selected.add(input.dataset.select) : state.selected.delete(input.dataset.select);
-  render();
-  document.querySelector(`[data-select="${input.dataset.select}"]`)?.focus();
+  input.closest?.('tr')?.classList.toggle('is-selected', input.checked);
+  renderSelection();
 });
 
 $('select-all').addEventListener('change', event => {
@@ -746,6 +835,9 @@ for (const operation of ['reverse', 'cancel']) $(`tab-${operation}`).addEventLis
   if (!state.busy) { switchScope({ operation: next, view: 'pending' }); $(`tab-${next}`).focus(); }
 });
 $('copy-filter').addEventListener('click', openCopy);
+$('search-number').addEventListener('input', applySearchFilter);
+$('search-form').addEventListener('submit', event => { event.preventDefault(); applySearchFilter(); openSearch(); });
+$('detail-jump').addEventListener('click', () => jumpTo(detailRecord));
 $('copy-again').addEventListener('click', copyClipboard);
 $('bulk-done').addEventListener('click', () => openConfirmation('done'));
 $('bulk-archive').addEventListener('click', () => openConfirmation('archive'));

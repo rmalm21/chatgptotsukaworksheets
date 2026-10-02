@@ -1,11 +1,17 @@
 {
   "name": "posting-desk-firebase",
-  "version": "3.0.8",
+  "version": "3.1.0",
   "private": true,
   "type": "module",
   "description": "Antrean Request Reverse dan Cancel Park untuk Firebase Hosting dan Teams.",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-posting-desk \"node --test tests/rules/*.emulator.mjs\"",
     "preview": "python3 -m http.server 8080 --directory public"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "firebase": "12.19.0",
+    "firebase-tools": "^15.32.1"
   }
 }

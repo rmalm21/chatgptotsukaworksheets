@@ -1,4 +1,4 @@
-> UI package v3.0.7 · Monthly index + Firestore-lite reads/writes + aligned entity/year.
+> Paket v3.1.0 · Cari & lacak nomor + riwayat aktivitas per dokumen + rules lebih ringan. Lihat **PATCH-v3.1.0.md**.
 
 # Posting Desk — Request Reverse & Cancel Park
 
@@ -7,6 +7,15 @@ Web untuk tim posting, dengan dua kamar: **Request Reverse** dan **Cancel Park**
 Konfigurasi Firebase sudah terisi untuk project **request-reverse-app**. Target Hosting **requestreverseacc** sudah dipetakan ke site **requestreverseacc** di `.firebaserc`. Alamat setelah deploy: **https://requestreverseacc.web.app**.
 
 Buka **BACA-DULU.html** untuk panduan yang bisa dibaca langsung dari hasil ekstrak ZIP.
+
+## Baru di versi 3.1
+
+- **Cari nomor dokumen** di atas daftar (tekan `/`). Mengetik menyaring daftar yang sedang dibuka tanpa read Firestore tambahan.
+- **Lacak di semua data** (Enter): satu atau banyak nomor 10 digit sekaligus, atau minimal 4 digit awal, dicari di semua jenis, entitas, tahun, dan status termasuk Arsip dan Sampah. Nomor yang belum pernah tercatat disebutkan. **Buka di daftar** pindah langsung ke ruang/entitas/status/bulan dokumen.
+- **Riwayat aktivitas** per dokumen (field `trail` + `trailCount`): dicatat, diedit (beserta perubahan), selesai, dibuka kembali, arsip, hapus, pulihkan; nama akun dan waktu server. Rules mewajibkan tepat satu entri baru per tulis dan menolak perubahan entri lama.
+- Cek duplikat saat kirim menyebut lokasi nomor yang sudah ada (jenis, entitas, tahun, status) dan memberi peringatan bila nomor yang sama tercatat di jenis/entitas/tahun lain.
+- Rules ditata ulang: profil anggota dibaca sekali per evaluasi. Diuji di Firestore Emulator, termasuk batch 100 dokumen baru dan bulk 250 dokumen.
+- Perbaikan tampilan: tag tahun lain tidak lagi menabrak kolom Requester; kartu mobile tidak melebar ke samping; tombol Selesaikan dan … tidak saling menimpa.
 
 ## Baru di versi 3.0
 
@@ -91,13 +100,13 @@ Untuk requester, gunakan `role: "requester"` dan nama orang tersebut. `active` b
 
 Anggota aktif bisa membaca dan menambah request. Requester boleh mengedit dan menghapus request open miliknya sendiri, serta memulihkannya dari Sampah. Pemosting (`poster`) bisa menyelesaikan, mengarsip, memulihkan, membuka kembali, mengedit semua request open, serta menghapus/memulihkan request tim. Profil dibuat admin melalui Console. Requester memakai displayName profil akun login. Nama dan UID pencatat tersimpan untuk riwayat.
 
-## 3. Deploy versi 3.0
+## 3. Deploy
 
 Upload ZIP baru ke Cloud Shell, lalu jalankan:
 
 ```bash
 cd ~
-unzip -o PostingDesk_RequestReverseAcc_v3.0.zip
+unzip -o PostingDesk_RequestReverseAcc_v3.1.0.zip
 cd ~/PostingDesk_RequestReverseAcc
 ls firebase.json
 firebase deploy --only firestore
@@ -109,6 +118,8 @@ Jalankan deploy dari folder **PostingDesk_RequestReverseAcc** yang memuat `fireb
 **Pada upgrade ini, deploy Firestore juga diperlukan:** ada rules dan indeks baru untuk ruang pribadi, hitungan open, Sampah, serta edit dan hapus sesuai pemilik akun. Tunggu indeks baru aktif di Firestore → Indexes, lalu muat ulang web. Indeks lama tetap tercantum agar upgrade tidak meminta penghapusan indeks yang dipakai versi sebelumnya. ID tetap berdasarkan jenis + entitas + tahun + nomor, dan data lama tetap bisa dibaca. Field edit dan Sampah diperkenalkan sebagai field opsional pada data lama; tidak perlu migrasi massal.
 
 Untuk perubahan tampilan berikutnya saja, gunakan `firebase deploy --only hosting:requestreverseacc`. Project default dan target sudah tersedia, sehingga `firebase init` tidak perlu dijalankan.
+
+**Upgrade ke 3.1 wajib deploy Firestore dan Hosting berurutan tanpa jeda:** rules 3.1 mewajibkan entri riwayat pada setiap tulis, sehingga tab yang masih memuat aplikasi 3.0.x akan ditolak saat menyimpan. Jalankan dua perintah di atas berturut-turut, lalu minta semua pengguna memuat ulang tab (Teams: klik kanan tab → Muat ulang). Tidak ada indeks baru; data lama tetap terbaca dan riwayatnya mulai tercatat saat diubah berikutnya.
 
 ## 4. Tab Website di group chat Teams
 
@@ -162,6 +173,13 @@ Buka `http://localhost:8080/?demo=1`. Demo memakai data contoh di perangkat ini 
 node --test tests/*.test.mjs
 ```
 
+Uji rules terhadap Firestore Emulator (butuh Java 11+ dan `npm install` sekali):
+
+```bash
+npm install
+npm run test:rules
+```
+
 Setelah deploy, coba dengan dua akun: requester menambah request; pemosting melihat, copy, bulk selesai, dan arsip. Coba juga membuka tab Website di Teams. Hasil pemeriksaan lokal dan batasnya ada di **VERIFIKASI.md**.
 
 ## Jika ada kendala
@@ -188,3 +206,6 @@ Default daftar memakai indeks bulan berdasarkan `requestDate`. Gunakan panah bul
 
 ## v3.0.8
 Perbaikan pembagian lebar kolom tabel desktop setelah pemisahan Entitas dan Tahun. Status tidak lagi terjepit/pecah vertikal dan mode Ringkas kembali padat.
+
+## v3.1.0
+Cari & lacak nomor, riwayat aktivitas per dokumen, rules lebih ringan dan teruji emulator, perbaikan layout tahun/mobile. Detail di PATCH-v3.1.0.md.
